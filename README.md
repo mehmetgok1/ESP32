@@ -4,7 +4,7 @@
 Esp-idf -> 5.3.1  
 lvgl    -> 8.3.11
 
-##File Structure
+## File Structure
 ### src/display_controller
   this file initialize GC9A01 sensor driver in idf envirounment  
   how it is doing basically, it create SPI bus then assign sensor spisific IO  
