@@ -15,4 +15,5 @@ lvgl    -> 8.3.11
   handle file to use this sensor which will be used by LVGL.  
 ### src/dptp_mng
   this buddy simply takes this handle files and introduce them to LVGL hence lvgl know how to  
-  communicate with display and touch controller.
+  communicate with display and touch controller. (meanwhile lvgl needs times etc this file initialize them also)  
+### src/ble 
