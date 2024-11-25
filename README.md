@@ -17,3 +17,17 @@ lvgl    -> 8.3.11
   this buddy simply takes this handle files and introduce them to LVGL hence lvgl know how to  
   communicate with display and touch controller. (meanwhile lvgl needs times etc this file initialize them also)  
 ### src/ble 
+  This file initiates bluetooth low energy drivers for this to be used, in menuconfig ble should be enabled.  
+  GAP GATTC handling is done here.
+  
+### src/ui 
+  User interface related files are inside this source files.
+
+## NOTE
+  UI and BLE files are somehow interleaved, that's because some bluetooth functions and variables are kept in ui and  
+  of course vice versa is also true.
+
+## Please enable blueetooth component in idf.py menuconfig -> component config -> Bluetooth 
+
+## How to build
+  
