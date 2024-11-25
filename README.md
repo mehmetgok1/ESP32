@@ -1,4 +1,4 @@
-# ESP32
+# ESP32-S3
 
 ## Versions
 Esp-idf -> 5.3.1  
@@ -30,4 +30,13 @@ lvgl    -> 8.3.11
 ## Please enable blueetooth component in idf.py menuconfig -> component config -> Bluetooth 
 
 ## How to build
+  create empty project with idf.py create-project "project_name"
+  go inside and replace the main directory completely with downloaded main from this repo  
+  type idf.py set-target esp32s3 to choose s3 target.
+  idf.py menuconfig to adjust configuration (go component config and enable bluetooth here)
+    1-) we need to enable ble 4.2 features component config -> bluetooth-> bluedroid options -> enable ble 4.2 features
+    2-) increase application partition, Partition Table → Partition Table -> choose single factor app (large), no OTA  
+    3-) adjust fonts,, go component config -> lvgl -> font -> enable montserra 16 18 20 22 24 26 fonts 
+     
+  idf.py build flash monitor
   
