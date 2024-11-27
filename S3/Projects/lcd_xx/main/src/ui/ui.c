@@ -67,6 +67,7 @@ static void btn_list_event_handler(lv_event_t *e) {
     lv_obj_t *list = lv_obj_get_parent(btn);          // Get the parent list
     const char *device_name = lv_list_get_btn_text(list, btn); // Get the button's text
     flag_connect=1;
+    scanning=false;
     strcpy(remote_device_name, device_name);
     printf("Button clicked: %s\n", device_name);
     esp_ble_gap_set_scan_params(&ble_scan_params);
