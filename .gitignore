@@ -7,5 +7,5 @@ S3/Projects/mquero
 S3/Projects/qmi
 S3/Projects/.vscode
 S3/Projects/lcd_xx.zip
-# S3/Projects/lcd_xx/managed_components
-S3/Projects/lcd_xx/build
+# S3/Projects/lcd_ble/managed_components
+S3/Projects/lcd_ble/build
