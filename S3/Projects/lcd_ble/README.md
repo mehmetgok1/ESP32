@@ -19,7 +19,7 @@ lvgl    -> 8.3.11
 ### src/ble 
   This file initiates bluetooth low energy drivers for this to be used, in menuconfig ble should be enabled.  
   GAP GATTC handling is done here.
-  ALSO ble.h contain information about ble server and characteristic UUID change as you wish (defaul 0x1818, 0x1819)
+  ALSO ble.c contain information about ble server and characteristic UUID change as you wish (defaults are a little long but names are REMOTE_SERVICE_UUID and REMOTE_CHAR_UUID)
   
 ### src/ui 
   User interface related files are inside this source files.

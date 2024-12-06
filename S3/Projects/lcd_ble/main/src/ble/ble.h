@@ -17,8 +17,6 @@
 #define PROFILE_NUM 1
 #define PROFILE_A_APP_ID 0
 #define MAX_DEVICES 50
-#define REMOTE_SERVICE_UUID        0x1818
-#define REMOTE_NOTIFY_CHAR_UUID    0x1819
 #define PROFILE_NUM      1
 #define PROFILE_A_APP_ID 0
 #define INVALID_HANDLE   0

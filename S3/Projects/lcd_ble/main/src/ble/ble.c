@@ -1,6 +1,12 @@
 #include "ble.h"
 #include "ui.h" 
 
+// service UUID: 7905F431-B5CE-4E99-A40F-4B1E122D00D0
+static const uint8_t REMOTE_SERVICE_UUID[16] = {0xD0, 0x00, 0x2D, 0x12, 0x1E, 0x4B, 0x0F, 0xA4, 0x99, 0x4E, 0xCE, 0xB5, 0x31, 0xF4, 0x05, 0x79};
+// Notification Source UUID: 9FBF120D-6301-42D9-8C58-25E699A21DBD(notifiable)
+static const uint8_t REMOTE_CHAR_UUID[16] = {0xbd, 0x1d, 0xa2, 0x99, 0xe6, 0x25, 0x58, 0x8c, 0xd9, 0x42, 0x01, 0x63, 0x0d, 0x12, 0xbf, 0x9f};
+// Control Point UUID:69D1D8F3-45E1-49A8-9821-9BBDFDAAD9D9(writeable with response)
+
 char device_name[MAX_DEVICES];  // +1 for null-terminator
 static bool connect    = false;
 static bool get_server = false;
@@ -12,20 +18,17 @@ void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
 void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param);
 void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param);
 
-
 static esp_bt_uuid_t remote_filter_service_uuid = {
     .len = ESP_UUID_LEN_128,
-    .uuid = {.uuid128 = REMOTE_SERVICE_UUID,},
 };
 
 static esp_bt_uuid_t remote_filter_char_uuid = {
     .len = ESP_UUID_LEN_128,
-    .uuid = {.uuid128 = REMOTE_NOTIFY_CHAR_UUID,},
 };
 
 static esp_bt_uuid_t notify_descr_uuid = {
-    .len = ESP_UUID_LEN_128,
-    .uuid = {.uuid128 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG,},
+    .len = ESP_UUID_LEN_16,
+    .uuid = {.uuid16 = {ESP_GATT_UUID_CHAR_CLIENT_CONFIG}},
 };
 
 esp_ble_scan_params_t ble_scan_params = {
@@ -186,6 +189,7 @@ void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc
             break;
         }
         ESP_LOGI(GATTC_TAG, "discover service complete conn_id %d", param->dis_srvc_cmpl.conn_id);
+        memcpy(remote_filter_service_uuid.uuid.uuid128,REMOTE_SERVICE_UUID,16);
         esp_ble_gattc_search_service(gattc_if, param->dis_srvc_cmpl.conn_id, &remote_filter_service_uuid);
         break;
     case ESP_GATTC_CFG_MTU_EVT:
@@ -197,12 +201,12 @@ void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc
     case ESP_GATTC_SEARCH_RES_EVT: {
         ESP_LOGI(GATTC_TAG, "SEARCH RES: conn_id = %x is primary service %d", p_data->search_res.conn_id, p_data->search_res.is_primary);
         ESP_LOGI(GATTC_TAG, "start handle %d end handle %d current handle value %d", p_data->search_res.start_handle, p_data->search_res.end_handle, p_data->search_res.srvc_id.inst_id);
-        if (p_data->search_res.srvc_id.uuid.len == ESP_UUID_LEN_128 && p_data->search_res.srvc_id.uuid.uuid.uuid128== REMOTE_SERVICE_UUID) {
+        if (p_data->search_res.srvc_id.uuid.len == ESP_UUID_LEN_128) {
             ESP_LOGI(GATTC_TAG, "service found");
             get_server = true;
             gl_profile_tab[PROFILE_A_APP_ID].service_start_handle = p_data->search_res.start_handle;
             gl_profile_tab[PROFILE_A_APP_ID].service_end_handle = p_data->search_res.end_handle;
-            ESP_LOGI(GATTC_TAG, "UUID128: %x", p_data->search_res.srvc_id.uuid.uuid.uuid128);
+            //ESP_LOGI(GATTC_TAG, "UUID128: %x", p_data->search_res.srvc_id.uuid.uuid.uuid128);
         }
         break;
     }
@@ -239,6 +243,7 @@ void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc
                     ESP_LOGE(GATTC_TAG, "gattc no mem");
                     break;
                 }else{
+                    memcpy(remote_filter_char_uuid.uuid.uuid128,REMOTE_CHAR_UUID,16);
                     status = esp_ble_gattc_get_char_by_uuid( gattc_if,
                                                              p_data->search_cmpl.conn_id,
                                                              gl_profile_tab[PROFILE_A_APP_ID].service_start_handle,
