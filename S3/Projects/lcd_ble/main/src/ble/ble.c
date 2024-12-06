@@ -14,18 +14,18 @@ void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc
 
 
 static esp_bt_uuid_t remote_filter_service_uuid = {
-    .len = ESP_UUID_LEN_16,
-    .uuid = {.uuid16 = REMOTE_SERVICE_UUID,},
+    .len = ESP_UUID_LEN_128,
+    .uuid = {.uuid128 = REMOTE_SERVICE_UUID,},
 };
 
 static esp_bt_uuid_t remote_filter_char_uuid = {
-    .len = ESP_UUID_LEN_16,
-    .uuid = {.uuid16 = REMOTE_NOTIFY_CHAR_UUID,},
+    .len = ESP_UUID_LEN_128,
+    .uuid = {.uuid128 = REMOTE_NOTIFY_CHAR_UUID,},
 };
 
 static esp_bt_uuid_t notify_descr_uuid = {
-    .len = ESP_UUID_LEN_16,
-    .uuid = {.uuid16 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG,},
+    .len = ESP_UUID_LEN_128,
+    .uuid = {.uuid128 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG,},
 };
 
 esp_ble_scan_params_t ble_scan_params = {
