@@ -1,10 +1,9 @@
 #include "ble.h"
 #include "ui.h" 
 
-// service UUID: 7905F431-B5CE-4E99-A40F-4B1E122D00D0
 static const uint8_t REMOTE_SERVICE_UUID[16] = {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x01, 0x00, 0x40, 0x6E};
-// Notification Source UUID: 9FBF120D-6301-42D9-8C58-25E699A21DBD(notifiable)
-static const uint8_t REMOTE_CHAR_UUID[16] = {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x02, 0x00, 0x40, 0x6E};
+static const uint8_t REMOTE_CHAR_WRITE_UUID[16] = {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x02, 0x00, 0x40, 0x6E};
+static const uint8_t REMOTE_CHAR_NOTIFY_UUID[16] = {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x03, 0x00, 0x40, 0x6E};
 
 
 char device_name[MAX_DEVICES];  // +1 for null-terminator
@@ -22,10 +21,13 @@ static esp_bt_uuid_t remote_filter_service_uuid = {
     .len = ESP_UUID_LEN_128,
 };
 
-static esp_bt_uuid_t remote_filter_char_uuid = {
+static esp_bt_uuid_t remote_filter_char_write_uuid = {
     .len = ESP_UUID_LEN_128,
 };
 
+static esp_bt_uuid_t remote_filter_char_uuid = {
+    .len = ESP_UUID_LEN_128,
+};
 static esp_bt_uuid_t notify_descr_uuid = {
     .len = ESP_UUID_LEN_16,
     .uuid = {.uuid16 = {ESP_GATT_UUID_CHAR_CLIENT_CONFIG}},
@@ -61,39 +63,27 @@ struct gattc_profile_inst gl_profile_tab[PROFILE_NUM] = {
 
 
 void write_data(int param1,int param2,int param3){
-    uint8_t write_char_data[12];
-    // Store param1
-    write_char_data[0] = (param1 >> 24) & 0xFF; // Most significant byte
-    write_char_data[1] = (param1 >> 16) & 0xFF;
-    write_char_data[2] = (param1 >> 8) & 0xFF;
-    write_char_data[3] = param1 & 0xFF;        // Least significant byte
+    char string_to_send[50];  // Ensure this buffer is large enough for your data
+    // Format the integers into the string
+    snprintf(string_to_send, sizeof(string_to_send), "%d,%d,%d", param1, param2, param3);
+    uint8_t *data_to_send = (uint8_t *)string_to_send; // Convert the string to a byte array
+    size_t data_length = strlen(string_to_send); // Length of the string (excluding null terminator)
 
-    // Store param2
-    write_char_data[4] = (param2 >> 24) & 0xFF;
-    write_char_data[5] = (param2 >> 16) & 0xFF;
-    write_char_data[6] = (param2 >> 8) & 0xFF;
-    write_char_data[7] = param2 & 0xFF;
+    // Write to the characteristic
+    esp_err_t status = esp_ble_gattc_write_char(gl_profile_tab[PROFILE_A_APP_ID].gattc_if,
+                                                gl_profile_tab[PROFILE_A_APP_ID].conn_id,
+                                                char_elem_result[1].char_handle,
+                                                data_length,            // Length of the data
+                                                data_to_send,           // Data pointer
+                                                ESP_GATT_WRITE_TYPE_RSP, // Write with response
+                                                ESP_GATT_AUTH_REQ_NONE); // No authentication
 
-    // Store param3
-    write_char_data[8] = (param3 >> 24) & 0xFF;
-    write_char_data[9] = (param3 >> 16) & 0xFF;
-    write_char_data[10] = (param3 >> 8) & 0xFF;
-    write_char_data[11] = param3 & 0xFF;
+    if (status != ESP_OK) {
+        ESP_LOGE("GATTC_WRITE", "Failed to write characteristic: %s", esp_err_to_name(status));
+    } else {
+        ESP_LOGI("GATTC_WRITE", "String sent successfully: %s", string_to_send);
+}
 
-    
-    char data_string[50]; // Buffer large enough to hold the output string
-
-    // Format the three integers into a single comma-separated string
-    snprintf(data_string, sizeof(data_string), "%d,%d,%d", param1, param2, param3);
-
-
-esp_ble_gattc_write_char( gl_profile_tab[PROFILE_A_APP_ID].gattc_if,
-                                  gl_profile_tab[PROFILE_A_APP_ID].conn_id,
-                                  gl_profile_tab[PROFILE_A_APP_ID].char_handle,
-                                  sizeof(data_string),
-                                  (uint8_t *)data_string,
-                                  ESP_GATT_WRITE_TYPE_RSP,
-                                  ESP_GATT_AUTH_REQ_NONE);
 }
 void init_ble(){
     // Initialize NVS.
@@ -243,7 +233,7 @@ void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc
                     ESP_LOGE(GATTC_TAG, "gattc no mem");
                     break;
                 }else{
-                    memcpy(remote_filter_char_uuid.uuid.uuid128,REMOTE_CHAR_UUID,16);
+                    memcpy(remote_filter_char_uuid.uuid.uuid128,REMOTE_CHAR_NOTIFY_UUID,16);
                     status = esp_ble_gattc_get_char_by_uuid( gattc_if,
                                                              p_data->search_cmpl.conn_id,
                                                              gl_profile_tab[PROFILE_A_APP_ID].service_start_handle,
@@ -257,15 +247,51 @@ void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc
                         char_elem_result = NULL;
                         break;
                     }
+                    memcpy(remote_filter_char_write_uuid.uuid.uuid128,REMOTE_CHAR_WRITE_UUID,16);
+                    esp_err_t status_write = esp_ble_gattc_get_char_by_uuid(
+                        gattc_if,
+                        p_data->search_cmpl.conn_id,
+                        gl_profile_tab[PROFILE_A_APP_ID].service_start_handle,
+                        gl_profile_tab[PROFILE_A_APP_ID].service_end_handle,
+                        remote_filter_char_write_uuid,
+                        &char_elem_result[1],  // Store Writable Characteristic in [1]
+                        &count
+                    );
+                    if (status_write == ESP_OK && count > 0) {
+                        ESP_LOGI("GATTC", "Found Writable Characteristic, Handle: 0x%x", char_elem_result[1].char_handle);
+                        lv_scr_load(connection_screen);
+
+                    } else {
+                        ESP_LOGE("GATTC", "Writable Characteristic not found.");
+                    }
+                    
+                    const char *string_to_send = "HelloServer"; // The string you want to send
+                    uint8_t *data_to_send = (uint8_t *)string_to_send; // Convert the string to a byte array
+                    size_t data_length = strlen(string_to_send); // Length of the string (excluding null terminator)
+
+                    // Write to the characteristic
+                    esp_err_t status = esp_ble_gattc_write_char(gl_profile_tab[PROFILE_A_APP_ID].gattc_if,
+                                                                gl_profile_tab[PROFILE_A_APP_ID].conn_id,
+                                                                char_elem_result[1].char_handle,
+                                                                data_length,            // Length of the data
+                                                                data_to_send,           // Data pointer
+                                                                ESP_GATT_WRITE_TYPE_RSP, // Write with response
+                                                                ESP_GATT_AUTH_REQ_NONE); // No authentication
+
+                    if (status != ESP_OK) {
+                        ESP_LOGE("GATTC_WRITE", "Failed to write characteristic: %s", esp_err_to_name(status));
+                    } else {
+                        ESP_LOGI("GATTC_WRITE", "String sent successfully: %s", string_to_send);
+                    }
 
                     /*  Every service have only one char in our 'ESP_GATTS_DEMO' demo, so we used first 'char_elem_result' */
                     if (count > 0 && (char_elem_result[0].properties & ESP_GATT_CHAR_PROP_BIT_NOTIFY)){
                         gl_profile_tab[PROFILE_A_APP_ID].char_handle = char_elem_result[0].char_handle;
-                        esp_ble_gattc_register_for_notify (gattc_if, gl_profile_tab[PROFILE_A_APP_ID].remote_bda, char_elem_result[0].char_handle);
+                        //esp_ble_gattc_register_for_notify (gattc_if, gl_profile_tab[PROFILE_A_APP_ID].remote_bda, char_elem_result[0].char_handle);
                     }
                 }
                 /* free char_elem_result */
-                free(char_elem_result);
+                //free(char_elem_result);
             }else{
                 ESP_LOGE(GATTC_TAG, "no char found");
             }
@@ -308,7 +334,7 @@ void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc
                         break;
                     }
                     /* Every char has only one descriptor in our 'ESP_GATTS_DEMO' demo, so we used first 'descr_elem_result' */
-                    if (count > 0 && descr_elem_result[0].uuid.len == ESP_UUID_LEN_128 && descr_elem_result[0].uuid.uuid.uuid128 == ESP_GATT_UUID_CHAR_CLIENT_CONFIG){
+                    if (count > 0 && descr_elem_result[0].uuid.len == ESP_UUID_LEN_16 && descr_elem_result[0].uuid.uuid.uuid16 == ESP_GATT_UUID_CHAR_CLIENT_CONFIG){
                         ret_status = esp_ble_gattc_write_char_descr( gattc_if,
                                                                      gl_profile_tab[PROFILE_A_APP_ID].conn_id,
                                                                      descr_elem_result[0].handle,
