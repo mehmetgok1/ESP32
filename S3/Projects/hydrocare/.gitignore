@@ -1,0 +1,14 @@
+# Ignore PlatformIO build folders in any subproject
+**/.pio/
+**/.pioenvs/
+**/.piolibdeps/
+
+# Ignore VS Code settings in any subproject
+**/.vscode/
+
+# Ignore local test files
+**/.test/
+
+# System files
+.DS_Store
+Thumbs.db

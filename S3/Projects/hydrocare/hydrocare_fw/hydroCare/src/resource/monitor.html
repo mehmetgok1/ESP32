@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Urinfo System</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root { --bg: #0d1117; --card: #161b22; --accent: #39d353; --text: #c9d1d9; --chart-bg: #1c2128; --btn-ota: #8957e5; --btn-stop: #da3633; }
+        body { background: var(--bg); color: var(--text); font-family: -apple-system, sans-serif; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        
+        .header-container { width: 100%; max-width: 900px; display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+        .fw-version { font-size: 0.8rem; color: #8b949e; font-family: monospace; }
+
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; width: 100%; max-width: 900px; margin-bottom: 20px; }
+        .card { background: var(--card); border: 1px solid #30363d; padding: 15px; border-radius: 10px; text-align: center; }
+        .value { font-size: 1.5rem; font-weight: bold; color: var(--accent); }
+        .label { font-size: 0.65rem; color: #8b949e; text-transform: uppercase; margin-bottom: 5px; }
+        
+        .control-panel { width: 100%; max-width: 900px; background: var(--card); border: 1px solid #30363d; border-radius: 10px; padding: 20px; margin-bottom: 20px; box-sizing: border-box; }
+        .input-group { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px; }
+        input[type="text"], input[type="password"] { background: #0d1117; border: 1px solid #30363d; color: white; padding: 10px; border-radius: 6px; flex: 1; min-width: 150px; }
+        
+        .hw-controls { display: flex; align-items: center; gap: 30px; padding-top: 15px; border-top: 1px solid #30363d; margin-top: 15px; flex-wrap: wrap; }
+        .toggle-wrapper { display: flex; align-items: center; gap: 10px; }
+        .switch { position: relative; display: inline-block; width: 44px; height: 22px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider-round { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #30363d; transition: .4s; border-radius: 34px; }
+        .slider-round:before { position: absolute; content: ""; height: 16px; width: 16px; left: 3px; bottom: 3px; background-color: white; transition: .4s; border-radius: 50%; }
+        input:checked + .slider-round { background-color: var(--accent); }
+        input:checked + .slider-round:before { transform: translateX(22px); }
+        
+        .range-wrapper { flex: 1; min-width: 200px; display: flex; align-items: center; gap: 15px; }
+        input[type="range"] { flex: 1; accent-color: var(--accent); cursor: pointer; }
+
+        .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+        button { padding: 12px 24px; background: #238636; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 0.9rem; flex: 1; }
+        button#btnStop { background: var(--btn-stop); }
+        button#btnOTA { background: var(--btn-ota); }
+        button#btnClear { background: #30363d; flex: 0.2; margin-top: 10px; }
+        button:disabled { background: #444 !important; cursor: not-allowed; }
+
+        .chart-container { width: 100%; max-width: 900px; background: var(--chart-bg); border: 1px solid #30363d; border-radius: 10px; padding: 15px; margin-bottom: 20px; box-sizing: border-box; }
+        #debug { width: 100%; max-width: 900px; height: 120px; background: black; color: #39d353; font-family: monospace; font-size: 0.75rem; padding: 10px; overflow-y: scroll; border-radius: 5px; border: 1px solid #333; box-sizing: border-box; }
+        canvas { max-height: 250px; }
+    </style>
+</head>
+<body>
+
+    <div class="header-container">
+        <h1>Urinfo System</h1>
+        <div class="fw-version">FW: <span id="fwVer">--</span></div>
+    </div>
+
+    <button id="btnConnect" onclick="startBLE()" style="margin-bottom: 20px; flex: none; width: 300px;">Connect Device</button>
+
+    <div class="control-panel">
+        <div class="label" style="margin-bottom: 10px;">Device Controls & OTA</div>
+        <div class="input-group">
+            <input type="text" id="startLabel" placeholder="Timestamp Label">
+            <input type="text" id="otaVersion" placeholder="Version (e.g. 1.0.1)">
+            <input type="text" id="wifiName" placeholder="WiFi Name">
+            <input type="password" id="wifiPass" placeholder="WiFi Password">
+        </div>
+        <div class="btn-row">
+            <button onclick="sendStartWithLabel()">Start</button>
+            <button id="btnStop" onclick="sendCommand('Com;Stop')">Stop</button>
+            <button id="btnOTA" onclick="sendOTA()">Start OTA</button>
+        </div>
+
+        <div class="hw-controls">
+            <div class="toggle-wrapper">
+                <span class="label">IR Light</span>
+                <label class="switch">
+                    <input type="checkbox" id="irToggle" onchange="toggleIR(this)">
+                    <span class="slider-round"></span>
+                </label>
+            </div>
+            <div class="range-wrapper">
+                <span class="label">LED Brightness</span>
+                <input type="range" id="ledSlider" min="0" max="100" value="0" oninput="updateLedValue(this.value)" onchange="sendLedBrightness(this.value)">
+                <span id="ledValLabel" style="font-family: monospace; min-width: 30px;">0</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="grid">
+        <div class="card"><div class="label">Battery</div><div class="value"><span id="valBat">--</span>%</div></div>
+        <div class="card"><div class="label">Lux</div><div class="value" id="valLux">--</div></div>
+        <div class="card"><div class="label">Ambient-I</div><div class="value" id="valAmbInt">--</div></div>
+        <div class="card"><div class="label">PIR</div><div class="value" id="valPir">--</div></div>
+        <div class="card"><div class="label">M-Dist</div><div class="value" id="valMDist">--</div></div>
+        <div class="card"><div class="label">M-Enrg</div><div class="value" id="valMEnrg">--</div></div>
+        <div class="card"><div class="label">S-Dist</div><div class="value" id="valSDist">--</div></div>
+        <div class="card"><div class="label">S-Enrg</div><div class="value" id="valSEnrg">--</div></div>
+        <div class="card"><div class="label">Detect</div><div class="value" id="valDDist">--</div></div>
+    </div>
+
+    <div class="chart-container"><canvas id="luxChart"></canvas></div>
+    <div class="chart-container"><canvas id="pirChart"></canvas></div>
+
+    <div id="debug">System Log: Ready...<br></div>
+    <button id="btnClear" onclick="document.getElementById('debug').innerHTML = ''">Clear Log</button>
+
+<script>
+    const SERVICE_UUID = '11111111-1111-1111-1111-111111111110';
+    const UUID_ACTION  = '11111111-1111-1111-2222-111111111116';
+    const UUID_MMWAVE  = '11111111-1111-1111-2222-111111111115';
+    const UUID_VERSION = '11111111-1111-1111-2222-111111111117';
+    
+    const SINGLE_CHARS = {
+        'valBat': '11111111-1111-1111-2222-111111111112',
+        'valLux': '11111111-1111-1111-2222-111111111113',
+        'valPir': '11111111-1111-1111-2222-111111111114',
+        // NEW UUID FOR INTERNAL AMBIENT LIGHT
+        'valAmbInt': '11111111-1111-1111-2222-111111111118'
+    };
+
+    let actionChar = null;
+
+    function toggleIR(cb) {
+        const state = cb.checked ? '1' : '0';
+        sendCommand(`Com;Control;IR;${state}`);
+    }
+
+    function updateLedValue(val) {
+        document.getElementById('ledValLabel').innerText = val;
+    }
+
+    function sendLedBrightness(val) {
+        sendCommand(`Com;Control;LED;${val}`);
+    }
+
+    function getTimestamp() {
+        const now = new Date();
+        const day = String(now.getDate()).padStart(2, '0');
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const year = now.getFullYear();
+        const hours = String(now.getHours()).padStart(2, '0');
+        const mins = String(now.getMinutes()).padStart(2, '0');
+        return `${day}${month}${year}_${hours}${mins}`;
+    }
+
+    function log(m) {
+        const d = document.getElementById('debug');
+        d.innerHTML += `> ${m}<br>`;
+        d.scrollTop = d.scrollHeight;
+    }
+
+    async function sendCommand(cmd) {
+        if (!actionChar) { log("Error: Not connected"); return; }
+        try {
+            await actionChar.writeValue(new TextEncoder().encode(cmd));
+            log(`Sent: ${cmd}`);
+        } catch (e) { log(`Error: ${e.message}`); }
+    }
+
+    function sendStartWithLabel() {
+        const labelValue = document.getElementById('startLabel').value || "Default";
+        sendCommand(`Com;Start;${labelValue}`);
+    }
+
+    function sendOTA() {
+        const ver = document.getElementById('otaVersion').value || "1.0.0";
+        const ssid = document.getElementById('wifiName').value;
+        const pass = document.getElementById('wifiPass').value;
+        if (!ssid || !pass) { alert("WiFi info missing!"); return; }
+        sendCommand(`Com;OTA;${ver};${ssid};${pass}`);
+    }
+
+    function handleSingle(id, buf) {
+        const clean = new TextDecoder().decode(buf).replace(/[^0-9.\-]/g, '');
+        if (!clean) return;
+        document.getElementById(id).innerText = clean;
+        if (id === 'valLux') updateChart(luxChart, parseFloat(clean));
+        if (id === 'valPir') updateChart(pirChart, parseFloat(clean));
+    }
+
+    const MMWAVE_IDS = ['valMDist', 'valMEnrg', 'valSDist', 'valSEnrg', 'valDDist'];
+    function handleMmwave(buf) {
+        const parts = new TextDecoder().decode(buf).split(',');
+        if (parts.length !== MMWAVE_IDS.length) return;
+        parts.forEach((v, i) => {
+            const clean = v.replace(/[^0-9.\-]/g, '');
+            if (clean) document.getElementById(MMWAVE_IDS[i]).innerText = clean;
+        });
+    }
+
+    const chartConfig = (l, c) => ({
+        type: 'line',
+        data: { labels: [], datasets: [{ label: l, data: [], borderColor: c, tension: 0.3, fill: false, pointRadius: 0 }] },
+        options: { responsive: true, animation: false, scales: { x: { display: false }, y: { beginAtZero: true } } }
+    });
+
+    const luxChart = new Chart(document.getElementById('luxChart').getContext('2d'), chartConfig('Lux', '#ffcc00'));
+    const pirChart = new Chart(document.getElementById('pirChart').getContext('2d'), chartConfig('PIR', '#58a6ff'));
+
+    function updateChart(chart, val) {
+        chart.data.labels.push('');
+        chart.data.datasets[0].data.push(val);
+        if (chart.data.labels.length > 30) { chart.data.labels.shift(); chart.data.datasets[0].data.shift(); }
+        chart.update('none');
+    }
+
+    async function subscribeChar(service, id, uuid, handler) {
+        try {
+            const char = await service.getCharacteristic(uuid);
+            char.addEventListener('characteristicvaluechanged', (e) => handler(e.target.value));
+            await char.startNotifications();
+            log(`✓ ${id}`);
+            const init = await char.readValue();
+            handler(init);
+        } catch (e) { log(`✗ ${id}`); }
+    }
+
+    async function startBLE() {
+        const btn = document.getElementById('btnConnect');
+        btn.disabled = true;
+        btn.innerText = 'Searching...';
+
+        try {
+            log("Opening Bluetooth selector...");
+            const device = await navigator.bluetooth.requestDevice({
+                filters: [{ namePrefix: 'Urinfo_' }],
+                optionalServices: [SERVICE_UUID]
+            });
+
+            log(`Connecting to ${device.name}...`);
+            const server = await device.gatt.connect();
+
+            const ts = getTimestamp();
+            document.getElementById('startLabel').value = ts;
+
+            const service = await server.getPrimaryService(SERVICE_UUID);
+            
+            try {
+                const verChar = await service.getCharacteristic(UUID_VERSION);
+                const verVal = await verChar.readValue();
+                const verStr = new TextDecoder().decode(verVal);
+                document.getElementById('fwVer').innerText = verStr;
+                log(`✓ Firmware: ${verStr}`);
+            } catch (vErr) { log("! Version unavailable"); }
+
+            actionChar = await service.getCharacteristic(UUID_ACTION);
+            log("✓ Command Link Ready");
+
+            for (const [id, uuid] of Object.entries(SINGLE_CHARS)) {
+                await subscribeChar(service, id, uuid, (buf) => handleSingle(id, buf));
+                await new Promise(r => setTimeout(r, 150)); 
+            }
+            await subscribeChar(service, 'mmWave', UUID_MMWAVE, handleMmwave);
+
+            btn.innerText = 'Connected ✓';
+
+            device.addEventListener('gattserverdisconnected', () => {
+                log('Device Lost');
+                actionChar = null;
+                document.getElementById('fwVer').innerText = '--';
+                btn.disabled = false;
+                btn.innerText = 'Connect Device';
+            });
+
+        } catch (err) {
+            log(`Error: ${err.message}`);
+            btn.disabled = false;
+            btn.innerText = 'Connect Device';
+        }
+    }
+</script>
+</body>
+</html>

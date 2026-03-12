@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32-S3 64x64 RGB888 Stream</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; background: #222; color: white; }
+        canvas { 
+            width: 256px; height: 256px; /* Scaled up for visibility */
+            image-rendering: pixelated; /* Keeps the 64x64 grid sharp */
+            border: 4px solid #444; background: #000; margin: 20px;
+        }
+        .controls { margin-top: 20px; }
+        button { padding: 10px 20px; font-size: 16px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 5px; }
+        button:disabled { background: #555; }
+        #status { color: #aaa; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+    <h2>Cough&Flow: Camera Monitor</h2>
+    <canvas id="cameraCanvas" width="64" height="64"></canvas>
+    
+    <div class="controls">
+        <button id="connectBtn">Connect to ESP32</button>
+    </div>
+    <p id="status">Status: Disconnected</p>
+
+    <script>
+        const connectBtn = document.getElementById('connectBtn');
+        const statusText = document.getElementById('status');
+        const canvas = document.getElementById('cameraCanvas');
+        const ctx = canvas.getContext('2d');
+
+        const HEADER = [0xFF, 0xAA];
+        const FOOTER = [0xBB, 0xFF];
+        const IMG_SIZE = 64 * 64 * 3; // 12,288 bytes
+
+        connectBtn.addEventListener('click', async () => {
+            try {
+                // Request port from user
+                const port = await navigator.serial.requestPort();
+                await port.open({ baudRate: 115200 }); // Matches your ESP32 Serial.begin
+                
+                connectBtn.disabled = true;
+                statusText.innerText = "Status: Connected. Waiting for data...";
+
+                const reader = port.readable.getReader();
+                let buffer = new Uint8Array(0);
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+
+                    // Merge new data into existing buffer
+                    let newBuf = new Uint8Array(buffer.length + value.length);
+                    newBuf.set(buffer);
+                    newBuf.set(value, buffer.length);
+                    buffer = newBuf;
+
+                    // Process buffer while it has enough data for at least Header + Image + Footer
+                    while (buffer.length >= (HEADER.length + IMG_SIZE + FOOTER.length)) {
+                        
+                        // Look for Header
+                        if (buffer[0] === HEADER[0] && buffer[1] === HEADER[1]) {
+                            
+                            // Check for Footer at the expected position
+                            const footerStart = HEADER.length + IMG_SIZE;
+                            if (buffer[footerStart] === FOOTER[0] && buffer[footerStart + 1] === FOOTER[1]) {
+                                
+                                // Extract and Render
+                                const pixelData = buffer.slice(HEADER.length, footerStart);
+                                renderToCanvas(pixelData);
+                                
+                                // Remove processed frame from buffer
+                                buffer = buffer.slice(footerStart + FOOTER.length);
+                            } else {
+                                // Invalid footer: Shift buffer by 1 and look for next header
+                                buffer = buffer.slice(1);
+                            }
+                        } else {
+                            // Header not at start: Shift buffer by 1
+                            buffer = buffer.slice(1);
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error(err);
+                statusText.innerText = "Error: " + err.message;
+            }
+        });
+
+        function renderToCanvas(rgbArray) {
+            const imageData = ctx.createImageData(64, 64);
+            let j = 0;
+            // Canvas expects RGBA (4 bytes), ESP32 sends RGB (3 bytes)
+            for (let i = 0; i < imageData.data.length; i += 4) {
+                imageData.data[i]     = rgbArray[j++];     // Red
+                imageData.data[i + 1] = rgbArray[j++];     // Green
+                imageData.data[i + 2] = rgbArray[j++];     // Blue
+                imageData.data[i + 3] = 255;               // Alpha
+            }
+            ctx.putImageData(imageData, 0, 0);
+            statusText.innerText = "Status: Streaming (" + new Date().toLocaleTimeString() + ")";
+        }
+    </script>
+</body>
+</html>
