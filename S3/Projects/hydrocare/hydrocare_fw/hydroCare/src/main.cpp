@@ -20,20 +20,53 @@ void setup() {
   disableTimer();
   initSPIComm();
   
-  Serial.println("\n=== HYDROCARE MASTER - 8704 BYTE DATA PACKETS ===");
-  Serial.println("Reading sensor data from slave every 1 second");
-  Serial.println("SPI Clock: 10 MHz\n");
+  Serial.println("\n=== HYDROCARE MASTER - SPI SENSOR ACQUISITION ===");
+  Serial.println("Reading sensor data from slave via SPI protocol");
+  Serial.println("SPI Clock: 10 MHz, Buffer: 8704 bytes\n");
 }
 
 void loop() {
-  static uint32_t lastRead = 0;
+  checkUSB();
   
-  if (millis() - lastRead > 1000) {
-    Serial.printf("\n[%u ms] Reading from slave...\n", millis());
-    readSlaveData();
-    lastRead = millis();
+  if (otaUpdateAvailable) {
+    uiOTAStarted();
+    connectToWiFi();
+    performOTAUpdate();
   }
   
-  delay(100);
+  if (deviceConnected && timerStream == 1 && deviceStatus == 1) {
+    static uint32_t lastSlaveRead = 0;
+    
+    String dataRow;
+    
+    // Measure all local sensors
+    measureBatteryLevel();
+    measureAmbLight();
+    measurePIR();
+    measuremmWave();
+    
+    // Read sensor data from slave every 2 seconds
+    if (millis() - lastSlaveRead >= 2000) {
+      Serial.println("\n[Master] Requesting sensor data from slave...");
+      readSlaveData();
+      lastSlaveRead = millis();
+    }
+    
+    // Build data row with local and slave measurements
+    dataRow = String(millis()) + "," +
+              String(batteryPercentage) + "," +
+              String(ambLight) + "," +
+              String(PIRValue) + "," +
+              String(movingDist) + "," +
+              String(movingEnergy) + "," +
+              String(staticDist) + "," +
+              String(staticEnergy) + "," +
+              String(detectionDist);
+    
+    logData(dataRow);
+    notifyAll();
+    
+    timerStream = 0;
+  }
 }
 

@@ -69,7 +69,6 @@ static TaskHandle_t measurementTaskHandle = NULL;
 
 // Event group bits
 #define EVENT_TRIGGER_RECEIVED (1 << 0)    // Trigger command received
-#define EVENT_MEASUREMENT_DONE (1 << 1)    // Measurement task finished collecting data
 
 // ============ Initialization ============
 void initSPIComm() {
@@ -242,9 +241,6 @@ static void measurementCollectorTask(void *pvParameters) {
       // Update state: data collection complete, ready for lock
       slaveState = STATE_READY_FOR_LOCK;
       Serial.println("[Measurement Task] ✓ Data ready, state = READY_FOR_LOCK");
-      
-      // Signal SPI handler that measurement is done
-      xEventGroupSetBits(spiEventGroup, EVENT_MEASUREMENT_DONE);
     }
     
     taskYIELD();  // Let other tasks run
@@ -295,7 +291,6 @@ void receiveCommand() {
         // Signal background measurement task to start collecting data
         // This returns IMMEDIATELY - SPI handler doesn't block
         xEventGroupSetBits(spiEventGroup, EVENT_TRIGGER_RECEIVED);
-        xEventGroupClearBits(spiEventGroup, EVENT_MEASUREMENT_DONE);
         
         Serial.println("[SPI] ✓ Measurement task triggered (non-blocking)");
       } else {
