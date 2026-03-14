@@ -117,7 +117,10 @@ void measureAmbLight()
   float current = voltage / R_LOAD; // in Amps
   float current_uA = current * 1e6; // convert to microamps
 
-  ambLight = current_uA * 1.0; // calibration factor (adjust!)
+  ambLight = (uint16_t)current_uA; // calibration factor (adjust!)
+  
+  // Debug output to verify sensor is working
+  Serial.printf("[AmbLight] RAW=%d V=%.3fV I=%.2fuA LUX=%u\n", raw, voltage, current_uA, ambLight);
 }
 void measureCamera()
 {
@@ -320,85 +323,4 @@ void initCamera()
   }
   else
     Serial.println("CAM_READY");
-}
-
-// ===== Measurement Collector Task =====
-// Waits for task notification from communication handler
-// When triggered, collects all sensor data and transitions to READY
-
-#include "communication/communication.h"
-
-void measurementCollectorTask(void *pvParameters)
-{
-  (void)pvParameters; // Unused
-
-  // Remove this task from watchdog (measurement operations can take time)
-  esp_task_wdt_delete(NULL);
-
-  Serial.println("[Measurement Task] Started - Waiting for trigger...");
-
-  while (1)
-  {
-    // Wait for task notification from communication handler (or 100ms timeout)
-    // The notification is sent when master sends TRIGGER_MEASUREMENT command
-    uint32_t notificationValue = ulTaskNotifyTake(
-        pdTRUE,            // Clear notification value after reading
-        pdMS_TO_TICKS(100) // Timeout: 100ms (acts as safety fallback)
-    );
-
-    // Only proceed if we got a notification or timeout (timed collection)
-    if (notificationValue > 0) {
-      Serial.println("[Measurement Task] ★ COLLECTING DATA...");
-
-      uint32_t startTime = millis();
-
-      // Collect ambient light (fast, ~1ms)
-      measureAmbLight();
-      g_dataBuffer.updateAmbLight(ambLight);
-
-      // Collect acceleration (fast, ~5ms)
-      readAcceleration();
-      g_dataBuffer.updateIMU(ax, ay, az, 0, 0, 0);  // TODO: add gyro readings
-
-      // Collect IR temperature frame (medium, ~300ms)
-      measureIRTemp();
-      // Convert float temperatures to uint16_t (scale by 100: 23.45°C → 2345)
-      uint16_t irData[192];
-      float avgTemp = 0;
-      for (int i = 0; i < 192; i++)
-      {
-        irData[i] = (uint16_t)((myIRcam.T_o[i] + 40) * 100);  // Offset for range, scale to uint16_t
-        avgTemp += myIRcam.T_o[i];
-      }
-      avgTemp /= 192;
-      g_dataBuffer.updateTemperature(avgTemp);
-      g_dataBuffer.updateIRFrame(irData);
-
-      // Collect RGB camera frame (slow, ~50-100ms)
-      camera_fb_t *fb = esp_camera_fb_get();
-      if (fb)
-      {
-        // Extract center 64×64 crop as RGB565 pixels
-        uint16_t rgbData[4096];
-        int startX = (fb->width - 64) / 2;
-        int startY = (fb->height - 64) / 2;
-
-        int idx = 0;
-        for (int row = 0; row < 64; row++)
-        {
-          for (int col = 0; col < 64; col++)
-          {
-            int src = ((startY + row) * fb->width + (startX + col)) * 2;
-            rgbData[idx++] = (fb->buf[src] << 8) | fb->buf[src + 1];
-          }
-        }
-        g_dataBuffer.updateRGBFrame(rgbData);
-        esp_camera_fb_return(fb);
-      }
-
-      uint32_t elapsedMs = millis() - startTime;
-      Serial.printf("[Measurement Task] Collection complete in %lu ms\n", elapsedMs);
-      g_dataBuffer.updateTimestamp();
-    }
-  }
 }

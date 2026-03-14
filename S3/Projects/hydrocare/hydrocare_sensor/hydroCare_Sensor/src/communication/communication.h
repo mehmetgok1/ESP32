@@ -2,20 +2,14 @@
 #define COMMUNICATION_H
 
 #include <Arduino.h>
-#include <SPI.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "dataBuffer.h"
+#include "config/config.h"
+#include <freertos/FreeRTOS.h>
 
-// Task declarations
-void spiCommunicationTask(void *pvParameters);
-void dataUpdateTask(void *pvParameters);
-
-// Initialization
+// Initialization and communication
 void initSPIComm();
 void receiveCommand();
 
-extern TaskHandle_t spiTaskHandle;
-extern TaskHandle_t dataTaskHandle;
+// Get slave status byte
+uint8_t getStatusByte();
 
 #endif

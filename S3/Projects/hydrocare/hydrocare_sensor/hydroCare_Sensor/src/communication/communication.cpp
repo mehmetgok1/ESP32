@@ -1,66 +1,66 @@
 #include "communication/communication.h"
 #include "config/config.h"
+#include "measurement/measurement.h"
 #include "driver/spi_slave.h"
-#include "esp_task_wdt.h"
+#include "esp_camera.h"
+#include "MLX90641.h"
+#include <Arduino.h>
+#include <cstring>
+#include <cmath>
 
-// DMA-capable buffers (8704 bytes for metadata + RGB + IR frames)
+// Protocol commands (match SLAVE_PROTOCOL.md)
+#define CMD_NONE 0x00
+#define CMD_TRIGGER_MEASUREMENT 0x01
+#define CMD_LOCK_BUFFERS 0x02
+#define CMD_TRANSFER_DATA 0x03
+
+// Slave status bits
+#define STATUS_MEASURING 0x01
+#define STATUS_MEASURED 0x02
+#define STATUS_LOCKED 0x04
+#define STATUS_READY_TRANSFER 0x08
+
+// Sensor data packet structure (8604 bytes)
+#pragma pack(1)
+typedef struct {
+  uint16_t sequence;              // Packet sequence number
+  uint16_t ambientLight;          // Ambient light value
+  float temperature;              // Temperature in °C
+  float humidity;                 // Humidity %
+  int16_t accelX, accelY, accelZ; // IMU accel
+  int16_t gyroX, gyroY, gyroZ;    // IMU gyro
+  uint32_t timestamp_ms;          // System uptime
+  uint8_t status;                 // Status flags
+  
+  // Camera data frames
+  uint16_t rgbFrame[4096];        // RGB565 64x64 (8192 bytes)
+  uint16_t irFrame[192];          // IR thermal 16x12 (384 bytes)
+} SensorDataPacket;
+#pragma pack()
+
+// DMA-capable buffers (8704 bytes = 1 status + 8603 packet)
 uint8_t *rxBuf;
 uint8_t *txBuf;
-const uint16_t SPI_BUFFER_SIZE = 8704;  // 8704 bytes per transaction (metadata + frames)
+const uint16_t SPI_BUFFER_SIZE = 8704;
 
-// Task handles (global)
-TaskHandle_t spiTaskHandle = NULL;
-TaskHandle_t dataTaskHandle = NULL;
+// Global sensor data
+static SensorDataPacket currentData = {0};
+static uint16_t sequenceNumber = 0;
 
-// Global data buffer
-extern DataBuffer g_dataBuffer;
+// State machine
+typedef enum {
+  STATE_IDLE = 0,
+  STATE_MEASURING = 1,
+  STATE_READY_FOR_LOCK = 2,
+  STATE_LOCKED = 3,
+  STATE_READY_FOR_TRANSFER = 4,
+  STATE_ERROR = 5
+} SlaveState;
 
-// SPI Communication Task - polls for master requests
-void spiCommunicationTask(void *pvParameters) {
-  (void)pvParameters;
-  
-  // Remove this task from watchdog (SPI can block waiting for master)
-  esp_task_wdt_delete(NULL);
-  
-  Serial.println("[SPI Task] Started - waiting for master transfers");
-  
-  while (1) {
-    // Block until master initiates SPI transfer
-    receiveCommand();
-    
-    // Small delay to prevent tight loop
-    vTaskDelay(pdMS_TO_TICKS(5));
-  }
-}
+static SlaveState slaveState = STATE_IDLE;
+static uint32_t measurementStartTime = 0;
 
-// Data Update Task - simulates sensor readings and updates buffer
-void dataUpdateTask(void *pvParameters) {
-  (void)pvParameters;
-  
-  Serial.println("[Data Task] Started - updating sensor readings + camera frames");
-  
-  static uint16_t counter = 0;
-  
-  while (1) {
-    // Simulate sensor readings
-    g_dataBuffer.updateAmbLight(1000 + (counter % 100));        
-    g_dataBuffer.updateTemperature(25.0f + (counter * 0.01f));  
-    g_dataBuffer.updateHumidity(50.0f + (counter * 0.05f));     
-    g_dataBuffer.updateIMU(
-      100 * sin(counter * 0.01f),   
-      100 * cos(counter * 0.01f),   
-      100,                          
-      10 * sin(counter * 0.02f),    
-      10 * cos(counter * 0.02f),    
-      5                             
-    );
-    g_dataBuffer.updateTimestamp();
-    
-    counter++;
-    vTaskDelay(pdMS_TO_TICKS(500));  // Update every 500ms (for camera operations)
-  }
-}
-
+// ============ Initialization ============
 void initSPIComm() {
   // Allocate DMA buffers
   rxBuf = (uint8_t*) heap_caps_malloc(SPI_BUFFER_SIZE, MALLOC_CAP_DMA);
@@ -71,12 +71,10 @@ void initSPIComm() {
     while(1) delay(1000);
   }
   
-  // Initialize data buffer
-  g_dataBuffer.init();
-  
   // Clear initial buffers
   memset(rxBuf, 0, SPI_BUFFER_SIZE);
   memset(txBuf, 0, SPI_BUFFER_SIZE);
+  memset(&currentData, 0, sizeof(SensorDataPacket));
   
   spi_bus_config_t buscfg = {
     .mosi_io_num     = SPI_MOSI,
@@ -84,14 +82,14 @@ void initSPIComm() {
     .sclk_io_num     = SPI_SCK,
     .quadwp_io_num   = -1,
     .quadhd_io_num   = -1,
-    .max_transfer_sz = 16384,  // Support 8704-byte extended packets
+    .max_transfer_sz = 16384,
   };
 
   spi_slave_interface_config_t slvcfg = {
     .spics_io_num  = SPI_CS,
     .flags         = 0,
     .queue_size    = 1,
-    .mode          = 0,
+    .mode          = 0,  // SPI_MODE0
     .post_setup_cb = NULL,
     .post_trans_cb = NULL,
   };
@@ -102,30 +100,202 @@ void initSPIComm() {
     while(1) delay(1000);
   }
   
-  Serial.println("[Slave] SPI Initialized (8704-byte packets with camera frames)");
+  Serial.println("[Slave] SPI Ready - Sequential, 8704 byte transfers");
 }
 
+// ============ Get Status Byte ============
+uint8_t getStatusByte() {
+  uint8_t status = 0x00;
+  
+  switch (slaveState) {
+    case STATE_MEASURING:
+      status |= STATUS_MEASURING;
+      break;
+    case STATE_READY_FOR_LOCK:
+      status |= STATUS_MEASURED;
+      break;
+    case STATE_LOCKED:
+      status |= STATUS_LOCKED;
+      break;
+    case STATE_READY_FOR_TRANSFER:
+      status |= STATUS_LOCKED | STATUS_READY_TRANSFER;
+      break;
+    default:
+      break;
+  }
+  
+  return status;
+}
+
+// ============ Measurement Collection (runs synchronously) ============
+void collectMeasurementData() {
+  Serial.println("[Measurement] ★ COLLECTING DATA...");
+  uint32_t startTime = millis();
+  
+  // 1. Ambient light (fast, ~1ms)
+  Serial.println("[Debug] Step 1: Measuring ambient light...");
+  measureAmbLight();
+  currentData.ambientLight = ambLight;
+  Serial.printf("[Debug] ✓ Ambient light: %d\n", ambLight);
+  
+  // 2. Acceleration (use most recent measurement, skip live read due to SPI conflict)
+  Serial.println("[Debug] Step 2: Using cached acceleration...");
+  // NOTE: Live reads during measurement cause hang - shared resources between FSPI and SPI2
+  // Workaround: use cached values from initialization
+  currentData.accelX = (int16_t)(ax * 1000);
+  currentData.accelY = (int16_t)(ay * 1000);
+  currentData.accelZ = (int16_t)(az * 1000);
+  currentData.gyroX = 0;
+  currentData.gyroY = 0;
+  currentData.gyroZ = 0;
+  Serial.printf("[Debug] ✓ Accel cached: X=%d Y=%d Z=%d\n", currentData.accelX, currentData.accelY, currentData.accelZ);
+  
+  // 3. IR temperature frame (medium, ~300ms at 4Hz)
+  Serial.println("[Debug] Step 3: Measuring IR thermal...");
+  measureIRTemp();
+  Serial.println("[Debug] ✓ IR measurement done, processing data...");
+  
+  float avgTemp = 0;
+  for (int i = 0; i < 192; i++) {
+    currentData.irFrame[i] = (uint16_t)((myIRcam.T_o[i] + 40) * 100);
+    avgTemp += myIRcam.T_o[i];
+  }
+  avgTemp /= 192;
+  currentData.temperature = avgTemp;
+  currentData.humidity = 0.0f;  // TODO: add humidity sensor
+  Serial.printf("[Debug] ✓ IR processed: avg temp = %.1f°C\n", avgTemp);
+  
+  // 4. RGB camera frame (slow, ~100ms)
+  Serial.println("[Debug] Step 4: Capturing RGB frame...");
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (fb) {
+    Serial.printf("[Debug] Camera buffer: %dx%d\n", fb->width, fb->height);
+    int startX = (fb->width - 64) / 2;
+    int startY = (fb->height - 64) / 2;
+    
+    int idx = 0;
+    for (int row = 0; row < 64; row++) {
+      for (int col = 0; col < 64; col++) {
+        int src = ((startY + row) * fb->width + (startX + col)) * 2;
+        currentData.rgbFrame[idx++] = (fb->buf[src] << 8) | fb->buf[src + 1];
+      }
+    }
+    esp_camera_fb_return(fb);
+    Serial.println("[Debug] ✓ RGB frame captured");
+  } else {
+    Serial.println("[Debug] ✗ Camera buffer NULL!");
+  }
+  
+  // 5. Timestamp
+  Serial.println("[Debug] Step 5: Setting timestamp...");
+  currentData.timestamp_ms = millis();
+  Serial.printf("[Debug] ✓ Timestamp: %lu ms\n", currentData.timestamp_ms);
+  
+  uint32_t elapsed = millis() - startTime;
+  Serial.printf("[Measurement] ✓ Complete in %lu ms\n", elapsed);
+}
+
+// ============ Main SPI Command Handler ============
 void receiveCommand() {
-  static spi_slave_transaction_t t;  
-  static int transaction_count = 0;
+  static spi_slave_transaction_t t;
+  static uint32_t transaction_count = 0;
   
-  // Prepare current sensor data in txBuf
-  g_dataBuffer.prepareTxBuffer(txBuf, SPI_BUFFER_SIZE);
+  // Prepare TX buffer: Byte 0 = status
+  uint8_t statusByte = getStatusByte();
   
-  // Setup transaction
+  // **CRITICAL**: Only clear txBuf if NOT in READY_FOR_TRANSFER state
+  // In READY_FOR_TRANSFER, preserve the packet data prepared during LOCK phase
+  if (slaveState != STATE_READY_FOR_TRANSFER) {
+    memset(txBuf, 0, SPI_BUFFER_SIZE);
+  }
+  txBuf[0] = statusByte;  // Always update status byte
+  
+  // Setup SPI transaction (always 8704 bytes)
   memset(&t, 0, sizeof(spi_slave_transaction_t));
-  t.length    = SPI_BUFFER_SIZE * 8;  // 256 bytes in bits
+  t.length    = SPI_BUFFER_SIZE * 8;  // 8704 bytes in bits
   t.rx_buffer = rxBuf;
   t.tx_buffer = txBuf;
 
-  // Wait for master (300ms timeout)
-  esp_err_t ret = spi_slave_transmit(SPI2_HOST, &t, 300);
+  // Wait for master with extended timeout
+  esp_err_t ret = spi_slave_transmit(SPI2_HOST, &t, 10000);  // 10-second timeout
+  
   if (ret == ESP_OK) {
     transaction_count++;
-    Serial.printf("[Slave] TX #%d: Sent 8704 bytes (metadata + RGB + IR)\n", transaction_count);
+    
+    // Read command from byte 0 of received data
+    uint8_t cmd = rxBuf[0];
+    
+    // Log transaction
+    Serial.printf("[Slave] RX #%lu: CMD=0x%02X Status=0x%02X | ", transaction_count, cmd, statusByte);
+    
+    // ========== COMMAND HANDLING ==========
+    
+    if (cmd == CMD_TRIGGER_MEASUREMENT) {
+      if (slaveState == STATE_IDLE) {
+        Serial.println("TRIGGER");
+        slaveState = STATE_MEASURING;
+        measurementStartTime = millis();
+        
+        // Collect measurement data synchronously
+        collectMeasurementData();
+        
+        // After collection, transition to READY_FOR_LOCK
+        slaveState = STATE_READY_FOR_LOCK;
+        Serial.println("[Measurement] ✓ Measurement complete, ready for lock");
+      } else {
+        Serial.printf("ERROR: Can't trigger in state %d\n", slaveState);
+      }
+    }
+    
+    else if (cmd == CMD_LOCK_BUFFERS) {
+      if (slaveState == STATE_READY_FOR_LOCK) {
+        Serial.println("LOCK");
+        
+        // Prepare the data packet for transfer
+        currentData.sequence = sequenceNumber++;
+        currentData.status = statusByte;
+        memcpy(txBuf + 1, &currentData, sizeof(SensorDataPacket));
+        
+        // Transition to READY_FOR_TRANSFER (data already prepared)
+        slaveState = STATE_READY_FOR_TRANSFER;
+        Serial.println("[Slave] ✓ Buffers locked and ready for transfer");
+      } else {
+        Serial.printf("ERROR: Can't lock in state %d\n", slaveState);
+      }
+    }
+    
+    else if (cmd == CMD_TRANSFER_DATA) {
+      if (slaveState == STATE_READY_FOR_TRANSFER) {
+        Serial.println("TRANSFER");
+        // Data already in txBuf from LOCK phase
+        // Return to IDLE after master finishes reading
+        slaveState = STATE_IDLE;
+        Serial.println("[Slave] ✓ Transfer complete, returning to IDLE");
+      } else {
+        Serial.printf("ERROR: Can't transfer in state %d\n", slaveState);
+      }
+    }
+    
+    else if (cmd == CMD_NONE) {
+      // Poll - just respond with current status
+      if (slaveState == STATE_MEASURING) {
+        Serial.println("POLL (still measuring)");
+      } else if (slaveState == STATE_READY_FOR_LOCK) {
+        Serial.println("POLL (ready for lock)");
+      } else if (slaveState == STATE_READY_FOR_TRANSFER) {
+        Serial.println("POLL (ready for transfer)");
+      } else {
+        Serial.println("POLL");
+      }
+    }
+    
+    else {
+      Serial.printf("UNKNOWN\n");
+    }
+    
   } else if (ret == ESP_ERR_TIMEOUT) {
-    // Timeout is normal - master not always sending
+    // Timeout is normal when master isn't active
   } else {
-    Serial.printf("[Slave] Error: %s (code: 0x%x)\n", esp_err_to_name(ret), ret);
+    Serial.printf("[Slave] SPI Error: %s\n", esp_err_to_name(ret));
   }
 }
