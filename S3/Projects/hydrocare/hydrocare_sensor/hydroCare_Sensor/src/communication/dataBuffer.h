@@ -5,7 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-// Simple sensor data packet (fits perfectly in 256-byte SPI frame)
+// Extended sensor data packet with camera frames
 typedef struct {
   uint16_t sequence;              // Packet sequence number (2 bytes)
   uint16_t ambientLight;          // Ambient light value (2 bytes)
@@ -14,13 +14,16 @@ typedef struct {
   int16_t accelX, accelY, accelZ; // IMU accel (6 bytes)
   int16_t gyroX, gyroY, gyroZ;    // IMU gyro (6 bytes)
   uint32_t timestamp_ms;          // System uptime (4 bytes)
-  uint16_t reserved;              // Future use (2 bytes)
   uint8_t status;                 // Status flags (1 byte)
   uint8_t crc;                    // Checksum (1 byte)
-  uint8_t padding[216];           // Padding to 256 bytes
+  uint8_t reserved[2];            // Alignment (2 bytes)
+  
+  // Camera data frames
+  uint16_t rgbFrame[4096];        // RGB565 64x64 (8192 bytes)
+  uint16_t irFrame[192];          // IR thermal 16x12 (384 bytes)
 } SensorDataPacket;
 
-// Total size: exactly 256 bytes
+// Total size: 32 + 8192 + 384 = 8608 bytes (round to 8704)
 
 class DataBuffer {
 private:
@@ -38,6 +41,8 @@ public:
   void updateTemperature(float value);
   void updateHumidity(float value);
   void updateIMU(int16_t ax, int16_t ay, int16_t az, int16_t gx, int16_t gy, int16_t gz);
+  void updateRGBFrame(uint16_t *frame);    // 64x64 RGB565
+  void updateIRFrame(uint16_t *frame);     // 16x12 thermal
   void updateTimestamp();
   
   // Called by SPI task: prepare packet for transmission

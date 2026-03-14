@@ -363,18 +363,36 @@ void measurementCollectorTask(void *pvParameters)
       // Collect IR temperature frame (medium, ~300ms)
       measureIRTemp();
       // Convert float temperatures to uint16_t (scale by 100: 23.45°C → 2345)
+      uint16_t irData[192];
+      float avgTemp = 0;
       for (int i = 0; i < 192; i++)
       {
-        // TODO: Send IR frame via separate task if needed
-        // For now, just update main temperature
-        if (i == 96) g_dataBuffer.updateTemperature(myIRcam.T_o[i]);
+        irData[i] = (uint16_t)((myIRcam.T_o[i] + 40) * 100);  // Offset for range, scale to uint16_t
+        avgTemp += myIRcam.T_o[i];
       }
+      avgTemp /= 192;
+      g_dataBuffer.updateTemperature(avgTemp);
+      g_dataBuffer.updateIRFrame(irData);
 
       // Collect RGB camera frame (slow, ~50-100ms)
       camera_fb_t *fb = esp_camera_fb_get();
       if (fb)
       {
-        // TODO: Send RGB frame data if needed for future expansion
+        // Extract center 64×64 crop as RGB565 pixels
+        uint16_t rgbData[4096];
+        int startX = (fb->width - 64) / 2;
+        int startY = (fb->height - 64) / 2;
+
+        int idx = 0;
+        for (int row = 0; row < 64; row++)
+        {
+          for (int col = 0; col < 64; col++)
+          {
+            int src = ((startY + row) * fb->width + (startX + col)) * 2;
+            rgbData[idx++] = (fb->buf[src] << 8) | fb->buf[src + 1];
+          }
+        }
+        g_dataBuffer.updateRGBFrame(rgbData);
         esp_camera_fb_return(fb);
       }
 

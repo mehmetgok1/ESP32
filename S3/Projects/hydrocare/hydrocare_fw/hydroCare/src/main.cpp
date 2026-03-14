@@ -20,15 +20,15 @@ void setup() {
   disableTimer();
   initSPIComm();
   
-  Serial.println("\n=== HYDROCARE MASTER - 256 BYTE DATA PACKETS ===");
-  Serial.println("Reading sensor data from slave every 5 seconds");
+  Serial.println("\n=== HYDROCARE MASTER - 8704 BYTE DATA PACKETS ===");
+  Serial.println("Reading sensor data from slave every 1 second");
   Serial.println("SPI Clock: 10 MHz\n");
 }
 
 void loop() {
   static uint32_t lastRead = 0;
   
-  if (millis() - lastRead > 5000) {
+  if (millis() - lastRead > 1000) {
     Serial.printf("\n[%u ms] Reading from slave...\n", millis());
     readSlaveData();
     lastRead = millis();

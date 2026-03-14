@@ -9,7 +9,7 @@ void setup() {
   // Initialize SPI
   initSPIComm();
   
-  Serial.println("\n=== HYDROCARE SENSOR SLAVE - 256 BYTE DATA PACKETS ===");
+  Serial.println("\n=== HYDROCARE SENSOR SLAVE - 8704 BYTE DATA PACKETS ===");
   Serial.println("Task-based architecture: SPI + Data update\n");
   
   // Create SPI Communication Task (Core 1, High Priority)

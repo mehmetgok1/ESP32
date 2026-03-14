@@ -14,14 +14,17 @@ typedef struct {
   int16_t accelX, accelY, accelZ; // IMU accel
   int16_t gyroX, gyroY, gyroZ;    // IMU gyro
   uint32_t timestamp_ms;          // System uptime
-  uint16_t reserved;              // Future use
   uint8_t status;                 // Status flags
   uint8_t crc;                    // Checksum
-  uint8_t padding[216];           // Padding to 256 bytes
+  uint8_t reserved[2];            // Alignment
+  
+  // Camera data frames
+  uint16_t rgbFrame[4096];        // RGB565 64x64 (8192 bytes)
+  uint16_t irFrame[192];          // IR thermal 16x12 (384 bytes)
 } SensorDataPacket;
 
 #define SPI_CLOCK_HZ     10000000  // 10 MHz
-#define SPI_BUFFER_SIZE  256        // 256 bytes per transaction
+#define SPI_BUFFER_SIZE  8704       // 8704 bytes per transaction
 
 SPIClass spi(HSPI);
 static uint8_t *spiTxBuffer = NULL;
@@ -44,16 +47,16 @@ void initSPIComm() {
   memset(spiTxBuffer, 0, SPI_BUFFER_SIZE);
   memset(spiRxBuffer, 0, SPI_BUFFER_SIZE);
   
-  Serial.println("[Master] SPI Init OK - 10 MHz, 256-byte data packets");
+  Serial.println("[Master] SPI Init OK - 10 MHz, 8704-byte data packets");
 }
 
 void readSlaveData() {
-  // Pull CS low and read 256-byte sensor packet
+  // Pull CS low and read 8704-byte packet
   spi.beginTransaction(SPISettings(SPI_CLOCK_HZ, MSBFIRST, SPI_MODE0));
   digitalWrite(SPI_CS, LOW);
   delayMicroseconds(50);
   
-  // Read 256 bytes
+  // Read 8704 bytes
   for (uint16_t i = 0; i < SPI_BUFFER_SIZE; i++) {
     spiRxBuffer[i] = spi.transfer(0x00);
   }
@@ -65,7 +68,7 @@ void readSlaveData() {
   // Parse packet
   SensorDataPacket *packet = (SensorDataPacket*)spiRxBuffer;
   
-  // Verify CRC (calculate only on data fields, not padding)
+  // Verify CRC (calculate only on data fields BEFORE crc byte)
   uint16_t crcSize = offsetof(SensorDataPacket, crc);
   uint8_t crc = 0;
   for (uint16_t i = 0; i < crcSize; i++) {
@@ -77,14 +80,27 @@ void readSlaveData() {
     return;
   }
   
+  // Calculate frame data statistics
+  uint16_t rgbMin = 65535, rgbMax = 0;
+  for (int i = 0; i < 4096; i++) {
+    if (packet->rgbFrame[i] < rgbMin) rgbMin = packet->rgbFrame[i];
+    if (packet->rgbFrame[i] > rgbMax) rgbMax = packet->rgbFrame[i];
+  }
+  
+  uint16_t irMin = 65535, irMax = 0;
+  for (int i = 0; i < 192; i++) {
+    if (packet->irFrame[i] < irMin) irMin = packet->irFrame[i];
+    if (packet->irFrame[i] > irMax) irMax = packet->irFrame[i];
+  }
+  
   // Display packet data
-  Serial.printf("[Master RX] #%u [T:%.1f°C H:%.1f%% L:%u] AX:%d AY:%d AZ:%d GX:%d GY:%d GZ:%d [OK]\n",
+  Serial.printf("[Master RX] #%u [T:%.1f°C H:%.1f%% L:%u] AX:%d AY:%d AZ:%d RGB[%u-%u] IR[%u-%u] [OK]\n", 
     packet->sequence,
     packet->temperature,
     packet->humidity,
     packet->ambientLight,
     packet->accelX, packet->accelY, packet->accelZ,
-    packet->gyroX, packet->gyroY, packet->gyroZ
+    rgbMin, rgbMax, irMin, irMax
   );
 }
 

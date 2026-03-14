@@ -3,10 +3,10 @@
 #include "driver/spi_slave.h"
 #include "esp_task_wdt.h"
 
-// DMA-capable buffers (256 bytes per transaction - reliable data packets)
+// DMA-capable buffers (8704 bytes for metadata + RGB + IR frames)
 uint8_t *rxBuf;
 uint8_t *txBuf;
-const uint16_t SPI_BUFFER_SIZE = 256;  // 256 bytes per transaction
+const uint16_t SPI_BUFFER_SIZE = 8704;  // 8704 bytes per transaction (metadata + frames)
 
 // Task handles (global)
 TaskHandle_t spiTaskHandle = NULL;
@@ -37,27 +37,27 @@ void spiCommunicationTask(void *pvParameters) {
 void dataUpdateTask(void *pvParameters) {
   (void)pvParameters;
   
-  Serial.println("[Data Task] Started - updating sensor readings every 100ms");
+  Serial.println("[Data Task] Started - updating sensor readings + camera frames");
   
   static uint16_t counter = 0;
   
   while (1) {
     // Simulate sensor readings
-    g_dataBuffer.updateAmbLight(1000 + (counter % 100));        // Simulate varying light
-    g_dataBuffer.updateTemperature(25.0f + (counter * 0.01f));  // Slowly increasing
-    g_dataBuffer.updateHumidity(50.0f + (counter * 0.05f));     // Slowly increasing
+    g_dataBuffer.updateAmbLight(1000 + (counter % 100));        
+    g_dataBuffer.updateTemperature(25.0f + (counter * 0.01f));  
+    g_dataBuffer.updateHumidity(50.0f + (counter * 0.05f));     
     g_dataBuffer.updateIMU(
-      100 * sin(counter * 0.01f),   // Accel X
-      100 * cos(counter * 0.01f),   // Accel Y
-      100,                          // Accel Z (constant)
-      10 * sin(counter * 0.02f),    // Gyro X
-      10 * cos(counter * 0.02f),    // Gyro Y
-      5                             // Gyro Z (constant)
+      100 * sin(counter * 0.01f),   
+      100 * cos(counter * 0.01f),   
+      100,                          
+      10 * sin(counter * 0.02f),    
+      10 * cos(counter * 0.02f),    
+      5                             
     );
     g_dataBuffer.updateTimestamp();
     
     counter++;
-    vTaskDelay(pdMS_TO_TICKS(100));  // Update every 100ms
+    vTaskDelay(pdMS_TO_TICKS(500));  // Update every 500ms (for camera operations)
   }
 }
 
@@ -84,7 +84,7 @@ void initSPIComm() {
     .sclk_io_num     = SPI_SCK,
     .quadwp_io_num   = -1,
     .quadhd_io_num   = -1,
-    .max_transfer_sz = 4096,
+    .max_transfer_sz = 16384,  // Support 8704-byte extended packets
   };
 
   spi_slave_interface_config_t slvcfg = {
@@ -102,7 +102,7 @@ void initSPIComm() {
     while(1) delay(1000);
   }
   
-  Serial.println("[Slave] SPI Initialized (256-byte data packets)");
+  Serial.println("[Slave] SPI Initialized (8704-byte packets with camera frames)");
 }
 
 void receiveCommand() {
@@ -122,7 +122,7 @@ void receiveCommand() {
   esp_err_t ret = spi_slave_transmit(SPI2_HOST, &t, 300);
   if (ret == ESP_OK) {
     transaction_count++;
-    Serial.printf("[Slave] TX #%d: Sent 256 bytes of sensor data\n", transaction_count);
+    Serial.printf("[Slave] TX #%d: Sent 8704 bytes (metadata + RGB + IR)\n", transaction_count);
   } else if (ret == ESP_ERR_TIMEOUT) {
     // Timeout is normal - master not always sending
   } else {

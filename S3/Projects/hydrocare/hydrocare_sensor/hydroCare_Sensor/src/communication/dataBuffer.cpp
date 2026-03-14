@@ -52,6 +52,20 @@ void DataBuffer::updateIMU(int16_t ax, int16_t ay, int16_t az, int16_t gx, int16
   }
 }
 
+void DataBuffer::updateRGBFrame(uint16_t *frame) {
+  if (frame && dataMutex && xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    memcpy(currentData.rgbFrame, frame, 4096 * sizeof(uint16_t));
+    xSemaphoreGive(dataMutex);
+  }
+}
+
+void DataBuffer::updateIRFrame(uint16_t *frame) {
+  if (frame && dataMutex && xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    memcpy(currentData.irFrame, frame, 192 * sizeof(uint16_t));
+    xSemaphoreGive(dataMutex);
+  }
+}
+
 void DataBuffer::updateTimestamp() {
   if (dataMutex && xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
     currentData.timestamp_ms = millis();
@@ -69,10 +83,7 @@ void DataBuffer::prepareTxBuffer(uint8_t *buffer, uint16_t bufferSize) {
     currentData.sequence = sequenceNumber++;
     currentData.status = 0x01;  // Mark as valid
     
-    // Zero out padding before CRC calculation
-    memset(currentData.padding, 0, sizeof(currentData.padding));
-    
-    // Calculate CRC only on data fields (first 32 bytes, excluding CRC and padding)
+    // Calculate CRC only on metadata fields BEFORE crc field (bytes 0-28)
     uint16_t crcSize = offsetof(SensorDataPacket, crc);
     currentData.crc = calculateCRC((uint8_t*)&currentData, crcSize);
     
