@@ -1,74 +1,96 @@
 #include "dataBuffer.h"
+#include <Arduino.h>
+#include <cstring>
+#include <cstddef>
 
-DataBuffer::DataBuffer() {
-  memset(&liveBuffer, 0, sizeof(SensorDataFrame));
-  memset(&stagingBuffer, 0, sizeof(SensorDataFrame));
-  memset(&readyBuffer, 0, sizeof(SensorDataFrame));
-  // Create mutex for buffer protection
-  bufferMutex = xSemaphoreCreateMutex();
+DataBuffer g_dataBuffer;
+
+DataBuffer::DataBuffer() : sequenceNumber(0) {
+  memset(&currentData, 0, sizeof(SensorDataPacket));
+  memset(&txData, 0, sizeof(SensorDataPacket));
+  dataMutex = xSemaphoreCreateMutex();
 }
 
-void DataBuffer::updateIMU(float x, float y, float z) {
-  if (bufferMutex && xSemaphoreTake(bufferMutex, portMAX_DELAY) == pdTRUE) {
-    liveBuffer.ax = x;
-    liveBuffer.ay = y;
-    liveBuffer.az = z;
-    liveBuffer.dataValid |= 0x01;  // Mark IMU as valid
-    xSemaphoreGive(bufferMutex);
+void DataBuffer::init() {
+  if (dataMutex == NULL) {
+    dataMutex = xSemaphoreCreateMutex();
   }
+  sequenceNumber = 0;
+  Serial.println("[DataBuffer] Initialized");
 }
 
 void DataBuffer::updateAmbLight(uint16_t value) {
-  if (bufferMutex && xSemaphoreTake(bufferMutex, portMAX_DELAY) == pdTRUE) {
-    liveBuffer.ambLight = value;
-    liveBuffer.dataValid |= 0x02;  // Mark ambient light as valid
-    xSemaphoreGive(bufferMutex);
+  if (dataMutex && xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    currentData.ambientLight = value;
+    xSemaphoreGive(dataMutex);
   }
 }
 
-void DataBuffer::updateIRFrame(uint16_t *frame) {
-  if (bufferMutex && xSemaphoreTake(bufferMutex, portMAX_DELAY) == pdTRUE) {
-    if (frame) {
-      memcpy(liveBuffer.irFrame, frame, sizeof(liveBuffer.irFrame));
-      liveBuffer.dataValid |= 0x04;  // Mark IR as valid
-    }
-    xSemaphoreGive(bufferMutex);
+void DataBuffer::updateTemperature(float value) {
+  if (dataMutex && xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    currentData.temperature = value;
+    xSemaphoreGive(dataMutex);
   }
 }
 
-void DataBuffer::updateRGBFrame(uint16_t *frame) {
-  if (bufferMutex && xSemaphoreTake(bufferMutex, portMAX_DELAY) == pdTRUE) {
-    if (frame) {
-      memcpy(liveBuffer.rgbFrame, frame, sizeof(liveBuffer.rgbFrame));
-      liveBuffer.dataValid |= 0x08;  // Mark RGB as valid
-    }
-    xSemaphoreGive(bufferMutex);
+void DataBuffer::updateHumidity(float value) {
+  if (dataMutex && xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    currentData.humidity = value;
+    xSemaphoreGive(dataMutex);
   }
 }
 
-void DataBuffer::commitFrame() {
-  if (bufferMutex && xSemaphoreTake(bufferMutex, portMAX_DELAY) == pdTRUE) {
-    liveBuffer.timestamp_ms = millis();
-    // Atomic swap: live → staging
-    memcpy(&stagingBuffer, &liveBuffer, sizeof(SensorDataFrame));
-    // Clear live buffer for next cycle
-    memset(&liveBuffer, 0, sizeof(SensorDataFrame));
-    xSemaphoreGive(bufferMutex);
+void DataBuffer::updateIMU(int16_t ax, int16_t ay, int16_t az, int16_t gx, int16_t gy, int16_t gz) {
+  if (dataMutex && xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    currentData.accelX = ax;
+    currentData.accelY = ay;
+    currentData.accelZ = az;
+    currentData.gyroX = gx;
+    currentData.gyroY = gy;
+    currentData.gyroZ = gz;
+    xSemaphoreGive(dataMutex);
   }
 }
 
-void DataBuffer::lockForTransfer() {
-  if (bufferMutex && xSemaphoreTake(bufferMutex, portMAX_DELAY) == pdTRUE) {
-    // Swap staging → ready (freezes data for transfer)
-    memcpy(&readyBuffer, &stagingBuffer, sizeof(SensorDataFrame));
-    xSemaphoreGive(bufferMutex);
+void DataBuffer::updateTimestamp() {
+  if (dataMutex && xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    currentData.timestamp_ms = millis();
+    xSemaphoreGive(dataMutex);
   }
 }
 
-const SensorDataFrame* DataBuffer::getReadableBuffer() const {
-  return &readyBuffer;
+void DataBuffer::prepareTxBuffer(uint8_t *buffer, uint16_t bufferSize) {
+  if (bufferSize < sizeof(SensorDataPacket)) {
+    return;
+  }
+
+  if (dataMutex && xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    // Copy current data to tx buffer
+    currentData.sequence = sequenceNumber++;
+    currentData.status = 0x01;  // Mark as valid
+    
+    // Zero out padding before CRC calculation
+    memset(currentData.padding, 0, sizeof(currentData.padding));
+    
+    // Calculate CRC only on data fields (first 32 bytes, excluding CRC and padding)
+    uint16_t crcSize = offsetof(SensorDataPacket, crc);
+    currentData.crc = calculateCRC((uint8_t*)&currentData, crcSize);
+    
+    // Copy to buffer
+    memcpy(buffer, &currentData, sizeof(SensorDataPacket));
+    
+    xSemaphoreGive(dataMutex);
+  }
 }
 
-uint8_t DataBuffer::getDataValidMask() const {
-  return readyBuffer.dataValid;
+SensorDataPacket* DataBuffer::getCurrentData() {
+  return &currentData;
+}
+
+uint8_t DataBuffer::calculateCRC(const uint8_t *data, uint16_t len) {
+  uint8_t crc = 0;
+  for (uint16_t i = 0; i < len; i++) {
+    crc ^= data[i];
+  }
+  return crc;
 }

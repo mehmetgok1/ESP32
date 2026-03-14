@@ -20,8 +20,10 @@ void initPins(){
   digitalWrite(FLASH_CS, HIGH);
   pinMode(Sensor_EN, OUTPUT);
   digitalWrite(Sensor_EN, HIGH);
+  Serial.println("[Master] Sensor_EN (GPIO16) set to HIGH");
   pinMode(Perip_EN, OUTPUT);
   digitalWrite(Perip_EN, HIGH);
+  Serial.println("[Master] Perip_EN (GPIO19) set to HIGH - Slave should power ON");
   pinMode(SD_CS, OUTPUT);
   digitalWrite(SD_CS, HIGH);
   pinMode(SPI_CS, OUTPUT);

@@ -1,63 +1,55 @@
 #ifndef DATA_BUFFER_H
 #define DATA_BUFFER_H
 
-#include <Arduino.h>
-#include <cstring>
+#include <stdint.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-// Data structure containing all sensor readings
+// Simple sensor data packet (fits perfectly in 256-byte SPI frame)
 typedef struct {
-  // IMU Data
-  float ax, ay, az;
-  
-  // Ambient Light
-  uint16_t ambLight;
-  
-  // IR Camera (MLX90641 - 16x12 = 192 pixels, 2 bytes each)
-  uint16_t irFrame[192];  // 384 bytes
-  
-  // RGB Camera (64x64 = 4096 pixels, 2 bytes each - RGB565)
-  uint16_t rgbFrame[4096];  // 8192 bytes
-  
-  // Timestamp
-  uint32_t timestamp_ms;
-  
-  // Status flags
-  uint8_t dataValid;  // Bitmask: bit 0=IMU, bit 1=AmbLight, bit 2=IR, bit 3=RGB
-} SensorDataFrame;
+  uint16_t sequence;              // Packet sequence number (2 bytes)
+  uint16_t ambientLight;          // Ambient light value (2 bytes)
+  float temperature;              // Temperature in °C (4 bytes)
+  float humidity;                 // Humidity % (4 bytes)
+  int16_t accelX, accelY, accelZ; // IMU accel (6 bytes)
+  int16_t gyroX, gyroY, gyroZ;    // IMU gyro (6 bytes)
+  uint32_t timestamp_ms;          // System uptime (4 bytes)
+  uint16_t reserved;              // Future use (2 bytes)
+  uint8_t status;                 // Status flags (1 byte)
+  uint8_t crc;                    // Checksum (1 byte)
+  uint8_t padding[216];           // Padding to 256 bytes
+} SensorDataPacket;
 
-// Total size: ~9KB per frame
+// Total size: exactly 256 bytes
 
 class DataBuffer {
 private:
-  SensorDataFrame liveBuffer;      // Being written by measurement tasks
-  SensorDataFrame stagingBuffer;   // Locked for SPI reads
-  SensorDataFrame readyBuffer;     // Safe for master to read
-  
-  // Use a FreeRTOS mutex to protect buffer access without disabling interrupts
-  SemaphoreHandle_t bufferMutex;
+  SensorDataPacket currentData;    // Current sensor readings
+  SensorDataPacket txData;         // Buffer to send via SPI
+  uint16_t sequenceNumber;         // Increments with each packet
+  SemaphoreHandle_t dataMutex;    // Protect concurrent access
   
 public:
   DataBuffer();
+  void init();
   
-  // Called by measurement tasks: write to live buffer
-  void updateIMU(float x, float y, float z);
+  // Called by measurement tasks: update sensor values
   void updateAmbLight(uint16_t value);
-  void updateIRFrame(uint16_t *frame);
-  void updateRGBFrame(uint16_t *frame);
+  void updateTemperature(float value);
+  void updateHumidity(float value);
+  void updateIMU(int16_t ax, int16_t ay, int16_t az, int16_t gx, int16_t gy, int16_t gz);
+  void updateTimestamp();
   
-  // Called by measurement task: mark frame ready and swap to staging
-  void commitFrame();
+  // Called by SPI task: prepare packet for transmission
+  void prepareTxBuffer(uint8_t *buffer, uint16_t bufferSize);
   
-  // Called by SPI handler: lock staging buffer for reading
-  void lockForTransfer();
+  // Get current sensor data
+  SensorDataPacket* getCurrentData();
   
-  // Called by SPI handler: read data
-  const SensorDataFrame* getReadableBuffer() const;
-  
-  // Get current data validity mask
-  uint8_t getDataValidMask() const;
+private:
+  uint8_t calculateCRC(const uint8_t *data, uint16_t len);
 };
+
+extern DataBuffer g_dataBuffer;
 
 #endif

@@ -346,61 +346,41 @@ void measurementCollectorTask(void *pvParameters)
         pdMS_TO_TICKS(100) // Timeout: 100ms (acts as safety fallback)
     );
 
-    // Only proceed if we got a notification (or spurious wakeup)
-    if (notificationValue > 0 || g_protocolState->isMeasuring())
-    {
+    // Only proceed if we got a notification or timeout (timed collection)
+    if (notificationValue > 0) {
       Serial.println("[Measurement Task] ★ COLLECTING DATA...");
 
       uint32_t startTime = millis();
 
       // Collect ambient light (fast, ~1ms)
       measureAmbLight();
-      g_dataBuffer->updateAmbLight(ambLight);
+      g_dataBuffer.updateAmbLight(ambLight);
 
       // Collect acceleration (fast, ~5ms)
       readAcceleration();
-      g_dataBuffer->updateIMU(ax, ay, az);
+      g_dataBuffer.updateIMU(ax, ay, az, 0, 0, 0);  // TODO: add gyro readings
 
       // Collect IR temperature frame (medium, ~300ms)
       measureIRTemp();
       // Convert float temperatures to uint16_t (scale by 100: 23.45°C → 2345)
-      uint16_t irData[192];
       for (int i = 0; i < 192; i++)
       {
-        irData[i] = (uint16_t)(myIRcam.T_o[i] * 100.0f + 0.5f); // Scale and round
+        // TODO: Send IR frame via separate task if needed
+        // For now, just update main temperature
+        if (i == 96) g_dataBuffer.updateTemperature(myIRcam.T_o[i]);
       }
-      g_dataBuffer->updateIRFrame(irData);
 
       // Collect RGB camera frame (slow, ~50-100ms)
       camera_fb_t *fb = esp_camera_fb_get();
       if (fb)
       {
-        uint16_t rgbData[4096];
-        int startX = (fb->width - CROP_SIZE) / 2;
-        int startY = (fb->height - CROP_SIZE) / 2;
-
-        // Extract center 64×64 crop as RGB565 pixels
-        int idx = 0;
-        for (int row = 0; row < CROP_SIZE; row++)
-        {
-          for (int col = 0; col < CROP_SIZE; col++)
-          {
-            int src = ((startY + row) * fb->width + (startX + col)) * 2;
-            rgbData[idx++] = (fb->buf[src] << 8) | fb->buf[src + 1];
-          }
-        }
-        g_dataBuffer->updateRGBFrame(rgbData);
+        // TODO: Send RGB frame data if needed for future expansion
         esp_camera_fb_return(fb);
       }
 
       uint32_t elapsedMs = millis() - startTime;
       Serial.printf("[Measurement Task] Collection complete in %lu ms\n", elapsedMs);
-
-      // Commit buffered data and transition to READY
-      g_dataBuffer->commitFrame();
-      g_protocolState->completeMeasurement();
-
-      Serial.println("[Measurement Task] ★ State → READY");
+      g_dataBuffer.updateTimestamp();
     }
   }
 }
