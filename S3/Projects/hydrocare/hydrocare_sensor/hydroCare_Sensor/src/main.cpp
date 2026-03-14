@@ -13,13 +13,17 @@ void setup() {
   initIRTemp();
   initSPIComm();
   
-  Serial.println("✓ Setup Complete - Ready for SPI");
+  // Start the background measurement task (runs on Core 0)
+  startMeasurementTask();
+  
+  Serial.println("✓ Setup Complete - Ready for SPI with concurrent measurement task");
 }
 
 void loop() {
-  // Sequential operation: receive command and handle it
-  // Note: Not calling readAcceleration() here - FSPI/SPI2 conflict prevents concurrent access
-  // Accelerometer values are captured during initialization and used as cache
+  // SPI Handler: Process commands from master
+  // Runs continuously on Core 1, fast and non-blocking
+  // When TRIGGER arrives, it signals the measurement task and returns immediately
+  // Measurement task runs on Core 0 in parallel
   receiveCommand();
 }
 

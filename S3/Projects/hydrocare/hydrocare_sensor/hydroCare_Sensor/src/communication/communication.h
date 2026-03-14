@@ -8,6 +8,7 @@
 // Initialization and communication
 void initSPIComm();
 void receiveCommand();
+void startMeasurementTask();  // Start background measurement collector task
 
 // Get slave status byte
 uint8_t getStatusByte();

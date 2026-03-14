@@ -7,6 +7,8 @@
 #include <Arduino.h>
 #include <cstring>
 #include <cmath>
+#include <freertos/event_groups.h>
+#include <freertos/semphr.h>
 
 // Protocol commands (match SLAVE_PROTOCOL.md)
 #define CMD_NONE 0x00
@@ -60,6 +62,15 @@ typedef enum {
 static SlaveState slaveState = STATE_IDLE;
 static uint32_t measurementStartTime = 0;
 
+// ============ FreeRTOS Synchronization ============
+static EventGroupHandle_t spiEventGroup = NULL;
+static SemaphoreHandle_t currentDataMutex = NULL;
+static TaskHandle_t measurementTaskHandle = NULL;
+
+// Event group bits
+#define EVENT_TRIGGER_RECEIVED (1 << 0)    // Trigger command received
+#define EVENT_MEASUREMENT_DONE (1 << 1)    // Measurement task finished collecting data
+
 // ============ Initialization ============
 void initSPIComm() {
   // Allocate DMA buffers
@@ -100,7 +111,16 @@ void initSPIComm() {
     while(1) delay(1000);
   }
   
-  Serial.println("[Slave] SPI Ready - Sequential, 8704 byte transfers");
+  // Create FreeRTOS synchronization primitives
+  spiEventGroup = xEventGroupCreate();
+  currentDataMutex = xSemaphoreCreateMutex();
+  
+  if (!spiEventGroup || !currentDataMutex) {
+    Serial.println("[Slave] Mutex/EventGroup creation failed!");
+    while(1) delay(1000);
+  }
+  
+  Serial.println("[Slave] SPI Ready - Concurrent architecture with background measurement task");
 }
 
 // ============ Get Status Byte ============
@@ -127,10 +147,13 @@ uint8_t getStatusByte() {
   return status;
 }
 
-// ============ Measurement Collection (runs synchronously) ============
+// ============ Measurement Collection (runs in background task) ============
 void collectMeasurementData() {
   Serial.println("[Measurement] ★ COLLECTING DATA...");
   uint32_t startTime = millis();
+  
+  // Acquire mutex before modifying currentData
+  xSemaphoreTake(currentDataMutex, portMAX_DELAY);
   
   // 1. Ambient light (fast, ~1ms)
   Serial.println("[Debug] Step 1: Measuring ambient light...");
@@ -191,11 +214,44 @@ void collectMeasurementData() {
   currentData.timestamp_ms = millis();
   Serial.printf("[Debug] ✓ Timestamp: %lu ms\n", currentData.timestamp_ms);
   
+  // Release mutex after all updates complete
+  xSemaphoreGive(currentDataMutex);
+  
   uint32_t elapsed = millis() - startTime;
   Serial.printf("[Measurement] ✓ Complete in %lu ms\n", elapsed);
 }
 
-// ============ Main SPI Command Handler ============
+// ============ Background Measurement Task ============
+static void measurementCollectorTask(void *pvParameters) {
+  while (1) {
+    // Wait for trigger event from SPI handler
+    EventBits_t uxBits = xEventGroupWaitBits(
+      spiEventGroup,
+      EVENT_TRIGGER_RECEIVED,
+      pdTRUE,  // Clear on exit
+      pdFALSE, // Don't wait for all bits
+      portMAX_DELAY
+    );
+    
+    if (uxBits & EVENT_TRIGGER_RECEIVED) {
+      Serial.println("[Measurement Task] ⚡ Triggered! Starting data collection...");
+      
+      // Collect measurement data (this blocks the task, but SPI handler is on different task)
+      collectMeasurementData();
+      
+      // Update state: data collection complete, ready for lock
+      slaveState = STATE_READY_FOR_LOCK;
+      Serial.println("[Measurement Task] ✓ Data ready, state = READY_FOR_LOCK");
+      
+      // Signal SPI handler that measurement is done
+      xEventGroupSetBits(spiEventGroup, EVENT_MEASUREMENT_DONE);
+    }
+    
+    taskYIELD();  // Let other tasks run
+  }
+}
+
+// ============ Main SPI Command Handler (Fast, Non-Blocking) ============
 void receiveCommand() {
   static spi_slave_transaction_t t;
   static uint32_t transaction_count = 0;
@@ -217,7 +273,7 @@ void receiveCommand() {
   t.tx_buffer = txBuf;
 
   // Wait for master with extended timeout
-  esp_err_t ret = spi_slave_transmit(SPI2_HOST, &t, 10000);  // 10-second timeout
+  esp_err_t ret = spi_slave_transmit(SPI2_HOST, &t, 100);  // 10-second timeout
   
   if (ret == ESP_OK) {
     transaction_count++;
@@ -228,7 +284,7 @@ void receiveCommand() {
     // Log transaction
     Serial.printf("[Slave] RX #%lu: CMD=0x%02X Status=0x%02X | ", transaction_count, cmd, statusByte);
     
-    // ========== COMMAND HANDLING ==========
+    // ========== COMMAND HANDLING (Fast state transitions, no blocking) ==========
     
     if (cmd == CMD_TRIGGER_MEASUREMENT) {
       if (slaveState == STATE_IDLE) {
@@ -236,12 +292,12 @@ void receiveCommand() {
         slaveState = STATE_MEASURING;
         measurementStartTime = millis();
         
-        // Collect measurement data synchronously
-        collectMeasurementData();
+        // Signal background measurement task to start collecting data
+        // This returns IMMEDIATELY - SPI handler doesn't block
+        xEventGroupSetBits(spiEventGroup, EVENT_TRIGGER_RECEIVED);
+        xEventGroupClearBits(spiEventGroup, EVENT_MEASUREMENT_DONE);
         
-        // After collection, transition to READY_FOR_LOCK
-        slaveState = STATE_READY_FOR_LOCK;
-        Serial.println("[Measurement] ✓ Measurement complete, ready for lock");
+        Serial.println("[SPI] ✓ Measurement task triggered (non-blocking)");
       } else {
         Serial.printf("ERROR: Can't trigger in state %d\n", slaveState);
       }
@@ -251,10 +307,14 @@ void receiveCommand() {
       if (slaveState == STATE_READY_FOR_LOCK) {
         Serial.println("LOCK");
         
-        // Prepare the data packet for transfer
+        // Acquire mutex, prepare packet for transfer
+        xSemaphoreTake(currentDataMutex, portMAX_DELAY);
+        
         currentData.sequence = sequenceNumber++;
         currentData.status = statusByte;
         memcpy(txBuf + 1, &currentData, sizeof(SensorDataPacket));
+        
+        xSemaphoreGive(currentDataMutex);
         
         // Transition to READY_FOR_TRANSFER (data already prepared)
         slaveState = STATE_READY_FOR_TRANSFER;
@@ -298,4 +358,20 @@ void receiveCommand() {
   } else {
     Serial.printf("[Slave] SPI Error: %s\n", esp_err_to_name(ret));
   }
+}
+
+// ============ Exposed Functions ============
+
+// Start the background measurement task (call from main setup)
+void startMeasurementTask() {
+  xTaskCreatePinnedToCore(
+    measurementCollectorTask,
+    "MeasurementCollector",
+    8192,           // Stack size (8 KB)
+    NULL,           // Parameters
+    2,              // Priority (higher than SPI handler's priority 1)
+    &measurementTaskHandle,
+    0               // Core 0
+  );
+  Serial.println("[Slave] Measurement task created on Core 0");
 }
