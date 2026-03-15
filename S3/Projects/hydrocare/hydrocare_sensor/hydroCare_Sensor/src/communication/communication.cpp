@@ -367,6 +367,13 @@ void receiveCommand() {
   t.rx_buffer = rxBuf;
   t.tx_buffer = txBuf;
 
+  // Debug: Check what's in txBuf BEFORE transmitting
+  if (slaveState == STATE_READY_FOR_TRANSFER) {
+    uint16_t *debugPtr = (uint16_t*)(&txBuf[8032]);
+    Serial.printf("[Debug Pre-TX] State=READY_FOR_TRANSFER, txBuf[8032] RGB: %04X %04X %04X %04X\n",
+      debugPtr[0], debugPtr[1], debugPtr[2], debugPtr[3]);
+  }
+
   // Wait for master with extended timeout
   esp_err_t ret = spi_slave_transmit(SPI2_HOST, &t, 100);  // 10-second timeout
   
@@ -381,6 +388,10 @@ void receiveCommand() {
     
     // ========== COMMAND HANDLING (Fast state transitions, no blocking) ==========
     
+    // ========== STATE-BASED COMMAND VALIDATION ==========
+    // Only accept commands that make sense in current state
+    // POLL (0x00) and LED commands always OK, reject others if state mismatch
+    
     if (cmd == CMD_TRIGGER_MEASUREMENT) {
       if (slaveState == STATE_IDLE) {
         Serial.println("TRIGGER");
@@ -393,7 +404,7 @@ void receiveCommand() {
         
         Serial.println("[SPI] ✓ Measurement task triggered (non-blocking)");
       } else {
-        Serial.printf("ERROR: Can't trigger in state %d\n", slaveState);
+        Serial.printf("ERROR: TRIGGER invalid in state %d (ignore)\n", slaveState);
       }
     }
     
@@ -406,7 +417,17 @@ void receiveCommand() {
         
         currentData.sequence = sequenceNumber++;
         currentData.status = statusByte;
+        
+        // Debug: Verify data exists BEFORE copy
+        Serial.printf("[Debug LOCK] currentData.rgbFrame[0-3]: %04X %04X %04X %04X\n",
+          currentData.rgbFrame[0], currentData.rgbFrame[1], currentData.rgbFrame[2], currentData.rgbFrame[3]);
+        
         memcpy(txBuf + 1, &currentData, sizeof(SensorDataPacket));
+        
+        // Debug: Verify data exists in txBuf AFTER copy (at byte offset 8033 = 1 + 8032)
+        uint16_t *txRgbPtr = (uint16_t*)(&txBuf[8033]);
+        Serial.printf("[Debug LOCK] txBuf RGB[0-3]: %04X %04X %04X %04X\n",
+          txRgbPtr[0], txRgbPtr[1], txRgbPtr[2], txRgbPtr[3]);
         
         xSemaphoreGive(currentDataMutex);
         
@@ -414,7 +435,7 @@ void receiveCommand() {
         slaveState = STATE_READY_FOR_TRANSFER;
         Serial.println("[Slave] ✓ Buffers locked and ready for transfer");
       } else {
-        Serial.printf("ERROR: Can't lock in state %d\n", slaveState);
+        Serial.printf("ERROR: LOCK invalid in state %d (ignore)\n", slaveState);
       }
     }
     
@@ -426,7 +447,7 @@ void receiveCommand() {
         slaveState = STATE_IDLE;
         Serial.println("[Slave] ✓ Transfer complete, returning to IDLE");
       } else {
-        Serial.printf("ERROR: Can't transfer in state %d\n", slaveState);
+        Serial.printf("ERROR: TRANSFER invalid in state %d (ignore)\n", slaveState);
       }
     }
     

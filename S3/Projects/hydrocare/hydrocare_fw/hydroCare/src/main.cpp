@@ -26,7 +26,7 @@ void setup() {
 }
 
 void loop() {
-  checkUSB();
+  //checkUSB();
   
   if (otaUpdateAvailable) {
     uiOTAStarted();
