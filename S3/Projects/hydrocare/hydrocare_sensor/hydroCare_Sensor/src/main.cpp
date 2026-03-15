@@ -13,17 +13,19 @@ void setup() {
   initIRTemp();
   initSPIComm();
   
-  // Start the background measurement task (runs on Core 0)
-  startMeasurementTask();
+  // Start background tasks
+  startHighSpeedSamplerTask();  // 1kHz accel + mic sampling on Core 0 (Priority 3)
+  startMeasurementTask();       // Measurement collector on Core 0 (Priority 2)
   
-  Serial.println("✓ Setup Complete - Ready for SPI with concurrent measurement task");
+  Serial.println("✓ Setup Complete - Ready for SPI with 1kHz sampler + concurrent measurements");
 }
 
 void loop() {
   // SPI Handler: Process commands from master
   // Runs continuously on Core 1, fast and non-blocking
   // When TRIGGER arrives, it signals the measurement task and returns immediately
-  // Measurement task runs on Core 0 in parallel
+  // High-speed sampler runs independently on Core 0 every 1ms
+  // Measurement task runs on Core 0 when triggered
   receiveCommand();
 }
 

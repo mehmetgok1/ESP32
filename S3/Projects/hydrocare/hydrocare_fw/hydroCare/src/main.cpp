@@ -22,7 +22,7 @@ void setup() {
   
   Serial.println("\n=== HYDROCARE MASTER - SPI SENSOR ACQUISITION ===");
   Serial.println("Reading sensor data from slave via SPI protocol");
-  Serial.println("SPI Clock: 10 MHz, Buffer: 8704 bytes\n");
+  Serial.println("SPI Clock: 10 MHz, Buffer: 20k bytes\n");
 }
 
 void loop() {
@@ -45,8 +45,8 @@ void loop() {
     measurePIR();
     measuremmWave();
     
-    // Read sensor data from slave every 2 seconds
-    if (millis() - lastSlaveRead >= 2000) {
+    // Read sensor data from slave every 1 second
+    if (millis() - lastSlaveRead >= 1000) {
       Serial.println("\n[Master] Requesting sensor data from slave...");
       readSlaveData();
       lastSlaveRead = millis();

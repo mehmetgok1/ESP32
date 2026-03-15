@@ -24,26 +24,34 @@
 #define STATUS_LOCKED 0x04
 #define STATUS_READY_TRANSFER 0x08
 
-// Sensor data packet structure (matches slave)
+// Sensor data packet structure (matches slave) with high-speed sampling
 #pragma pack(1)
 typedef struct {
+  // Metadata
   uint16_t sequence;              // Packet sequence number
-  uint16_t ambientLight;          // Ambient light value
-  float temperature;              // Temperature in °C
-  float humidity;                 // Humidity %
-  int16_t accelX, accelY, accelZ; // IMU accel
-  int16_t gyroX, gyroY, gyroZ;    // IMU gyro
-  uint32_t timestamp_ms;          // System uptime
+  uint16_t ambientLight;          // Ambient light value (instantaneous)
+  float temperature;              // Temperature in °C (average)
+  float humidity;                 // Humidity % (average)
+  int16_t accelX, accelY, accelZ; // IMU accel (most recent single sample)
+  int16_t gyroX, gyroY, gyroZ;    // IMU gyro (unused, zeros)
+  uint32_t timestamp_ms;          // System uptime when measurement triggered
   uint8_t status;                 // Status flags
+  uint16_t accelSampleCount;      // Number of accel/mic samples in this packet (1000)
   
-  // Camera data frames
+  // High-speed samples (1kHz sampling over 1 second measurement window)
+  int16_t accelX_samples[1000];   // 1000 accel X samples @ 1kHz = 1 second
+  int16_t accelY_samples[1000];   // 1000 accel Y samples @ 1kHz = 1 second
+  int16_t accelZ_samples[1000];   // 1000 accel Z samples @ 1kHz = 1 second
+  uint16_t microphoneSamples[1000]; // 1000 microphone samples @ 1kHz = 1 second
+  
+  // Slow sensor frames (camera data)
   uint16_t rgbFrame[4096];        // RGB565 64x64 (8192 bytes)
   uint16_t irFrame[192];          // IR thermal 16x12 (384 bytes)
 } SensorDataPacket;
 #pragma pack()
 
 #define SPI_CLOCK_HZ     10000000  // 10 MHz
-#define SPI_BUFFER_SIZE  8704       // 8704 bytes per transaction
+#define SPI_BUFFER_SIZE  20480      // 20KB buffer for 16.6KB packet (1kHz sampling data)
 
 SPIClass spi(HSPI);
 static uint8_t *spiTxBuffer = NULL;
@@ -71,17 +79,17 @@ void initSPIComm() {
 
 // Send a command to slave and get immediate response
 uint8_t sendCommand(uint8_t cmd) {
-  memset(spiTxBuffer, 0, 10);
+  // CRITICAL: Match slave's SPI_BUFFER_SIZE (20480) to prevent transaction misalignment
+  memset(spiTxBuffer, 0, SPI_BUFFER_SIZE);
   spiTxBuffer[0] = cmd;
   
   spi.beginTransaction(SPISettings(SPI_CLOCK_HZ, MSBFIRST, SPI_MODE0));
   digitalWrite(SPI_CS, LOW);
   delayMicroseconds(50);
   
+  // Read response byte and send full buffer (20480 bytes total)
   uint8_t response = spi.transfer(cmd);
-  
-  // Complete 10-byte handshake
-  for (int i = 1; i < 10; i++) {
+  for (uint16_t i = 1; i < SPI_BUFFER_SIZE; i++) {
     spi.transfer(0x00);
   }
   
@@ -107,7 +115,7 @@ bool pollStatus(uint8_t statusFlag, uint32_t timeoutMs) {
     if (status & statusFlag) {
       return true;
     }
-    delay(10);
+    delay(100);  // Poll every 100ms (tight polling)
   }
   
   return false;
@@ -139,26 +147,73 @@ void readSensorData() {
   // Parse packet from byte 1 onwards
   SensorDataPacket *packet = (SensorDataPacket*)(&spiRxBuffer[1]);
   
-  // Calculate frame data statistics
+  // Calculate frame data statistics (RGB)
   uint16_t rgbMin = 65535, rgbMax = 0;
   for (int i = 0; i < 4096; i++) {
     if (packet->rgbFrame[i] < rgbMin) rgbMin = packet->rgbFrame[i];
     if (packet->rgbFrame[i] > rgbMax) rgbMax = packet->rgbFrame[i];
   }
   
+  // Calculate frame data statistics (IR)
   uint16_t irMin = 65535, irMax = 0;
   for (int i = 0; i < 192; i++) {
     if (packet->irFrame[i] < irMin) irMin = packet->irFrame[i];
     if (packet->irFrame[i] > irMax) irMax = packet->irFrame[i];
   }
   
-  // Display packet data
-  Serial.printf("[Master RX] #%u [T:%.1f°C H:%.1f%% L:%u] AX:%d AY:%d AZ:%d RGB[%u-%u] IR[%u-%u] [OK]\n", 
+  // Calculate high-speed sampling statistics
+  int32_t accelX_sum = 0, accelY_sum = 0, accelZ_sum = 0;
+  uint32_t mic_sum = 0;
+  int16_t accelX_min = 32767, accelX_max = -32768;
+  int16_t accelY_min = 32767, accelY_max = -32768;
+  int16_t accelZ_min = 32767, accelZ_max = -32768;
+  uint16_t mic_min = 65535, mic_max = 0;
+  
+  for (int i = 0; i < packet->accelSampleCount; i++) {
+    // Accel X stats
+    accelX_sum += packet->accelX_samples[i];
+    if (packet->accelX_samples[i] < accelX_min) accelX_min = packet->accelX_samples[i];
+    if (packet->accelX_samples[i] > accelX_max) accelX_max = packet->accelX_samples[i];
+    
+    // Accel Y stats
+    accelY_sum += packet->accelY_samples[i];
+    if (packet->accelY_samples[i] < accelY_min) accelY_min = packet->accelY_samples[i];
+    if (packet->accelY_samples[i] > accelY_max) accelY_max = packet->accelY_samples[i];
+    
+    // Accel Z stats
+    accelZ_sum += packet->accelZ_samples[i];
+    if (packet->accelZ_samples[i] < accelZ_min) accelZ_min = packet->accelZ_samples[i];
+    if (packet->accelZ_samples[i] > accelZ_max) accelZ_max = packet->accelZ_samples[i];
+    
+    // Microphone stats
+    mic_sum += packet->microphoneSamples[i];
+    if (packet->microphoneSamples[i] < mic_min) mic_min = packet->microphoneSamples[i];
+    if (packet->microphoneSamples[i] > mic_max) mic_max = packet->microphoneSamples[i];
+  }
+  
+  float accelX_avg = (float)accelX_sum / packet->accelSampleCount;
+  float accelY_avg = (float)accelY_sum / packet->accelSampleCount;
+  float accelZ_avg = (float)accelZ_sum / packet->accelSampleCount;
+  float mic_avg = (float)mic_sum / packet->accelSampleCount;
+  
+  // Display packet metadata
+  Serial.printf("[Master RX] #%u [T:%.1f°C H:%.1f%% L:%u] AX:%d AY:%d AZ:%d\n", 
     packet->sequence,
     packet->temperature,
     packet->humidity,
     packet->ambientLight,
-    packet->accelX, packet->accelY, packet->accelZ,
+    packet->accelX, packet->accelY, packet->accelZ
+  );
+  
+  // Display high-speed sampling statistics
+  Serial.printf("[Master RX] 1kHz Samples (%u total):\n", packet->accelSampleCount);
+  Serial.printf("  AccelX: avg=%+.1f min=%+d max=%+d (mG)\n", accelX_avg, accelX_min, accelX_max);
+  Serial.printf("  AccelY: avg=%+.1f min=%+d max=%+d (mG)\n", accelY_avg, accelY_min, accelY_max);
+  Serial.printf("  AccelZ: avg=%+.1f min=%+d max=%+d (mG)\n", accelZ_avg, accelZ_min, accelZ_max);
+  Serial.printf("  Microphone: avg=%.0f min=%u max=%u\n", mic_avg, mic_min, mic_max);
+  
+  // Display camera frame statistics
+  Serial.printf("[Master RX] Frames: RGB[%u-%u] IR[%u-%u] [OK]\n", 
     rgbMin, rgbMax, irMin, irMax
   );
 }
@@ -175,7 +230,7 @@ void readSlaveData() {
   
   // Step 2: Poll until STATUS_MEASURED
   Serial.println("[Master] Step 2: Waiting for measurement to complete...");
-  if (!pollStatus(STATUS_MEASURED, 10000)) {
+  if (!pollStatus(STATUS_MEASURED, 2000)) {
     Serial.println("[Master] ERROR: Timeout waiting for STATUS_MEASURED");
     return;
   }
@@ -189,7 +244,7 @@ void readSlaveData() {
   
   // Step 4: Poll until STATUS_LOCKED
   Serial.println("[Master] Step 4: Waiting for buffers to be locked...");
-  if (!pollStatus(STATUS_LOCKED, 10000)) {
+  if (!pollStatus(STATUS_LOCKED, 2000)) {
     Serial.println("[Master] ERROR: Timeout waiting for STATUS_LOCKED");
     return;
   }
@@ -208,7 +263,7 @@ void readSlaveData() {
 // Stub functions for compatibility with BLE module
 void sendIRLED(bool state) {
   uint8_t cmd = CMD_IR_LED;
-  memset(spiTxBuffer, 0, 10);
+  memset(spiTxBuffer, 0, SPI_BUFFER_SIZE);  // Use full buffer size for transaction alignment
   spiTxBuffer[0] = cmd;
   spiTxBuffer[1] = state ? 0x01 : 0x00;  // 1=on, 0=off
   
@@ -216,8 +271,8 @@ void sendIRLED(bool state) {
   digitalWrite(SPI_CS, LOW);
   delayMicroseconds(50);
   
-  // Send command and LED state
-  for (int i = 0; i < 10; i++) {
+  // Send full 20480-byte transaction to match slave buffer size
+  for (uint16_t i = 0; i < SPI_BUFFER_SIZE; i++) {
     spi.transfer(spiTxBuffer[i]);
   }
   
@@ -230,7 +285,7 @@ void sendIRLED(bool state) {
 
 void sendBrightness(uint8_t brightness) {
   uint8_t cmd = CMD_LED_BRIGHTNESS;
-  memset(spiTxBuffer, 0, 10);
+  memset(spiTxBuffer, 0, SPI_BUFFER_SIZE);  // Use full buffer size for transaction alignment
   spiTxBuffer[0] = cmd;
   spiTxBuffer[1] = brightness;  // 0-100
   
@@ -238,8 +293,8 @@ void sendBrightness(uint8_t brightness) {
   digitalWrite(SPI_CS, LOW);
   delayMicroseconds(50);
   
-  // Send command and brightness value
-  for (int i = 0; i < 10; i++) {
+  // Send full 20480-byte transaction to match slave buffer size
+  for (uint16_t i = 0; i < SPI_BUFFER_SIZE; i++) {
     spi.transfer(spiTxBuffer[i]);
   }
   

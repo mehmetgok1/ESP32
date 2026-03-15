@@ -28,28 +28,46 @@
 #define STATUS_LOCKED 0x04
 #define STATUS_READY_TRANSFER 0x08
 
-// Sensor data packet structure (8604 bytes)
+// Sensor data packet structure with high-speed samples (~16.6KB)
 #pragma pack(1)
 typedef struct {
+  // Metadata
   uint16_t sequence;              // Packet sequence number
-  uint16_t ambientLight;          // Ambient light value
-  float temperature;              // Temperature in °C
-  float humidity;                 // Humidity %
-  int16_t accelX, accelY, accelZ; // IMU accel
-  int16_t gyroX, gyroY, gyroZ;    // IMU gyro
-  uint32_t timestamp_ms;          // System uptime
+  uint16_t ambientLight;          // Ambient light value (instantaneous)
+  float temperature;              // Temperature in °C (average)
+  float humidity;                 // Humidity % (average)
+  int16_t accelX, accelY, accelZ; // IMU accel (most recent single sample)
+  int16_t gyroX, gyroY, gyroZ;    // IMU gyro (unused, zeros)
+  uint32_t timestamp_ms;          // System uptime when measurement triggered
   uint8_t status;                 // Status flags
+  uint16_t accelSampleCount;      // Number of accel/mic samples in this packet (1000)
   
-  // Camera data frames
+  // High-speed samples (1kHz sampling over 1 second measurement window)
+  int16_t accelX_samples[1000];    // 1000 accel X samples @ 1kHz = 1 second
+  int16_t accelY_samples[1000];    // 1000 accel Y samples @ 1kHz = 1 second
+  int16_t accelZ_samples[1000];    // 1000 accel Z samples @ 1kHz = 1 second
+  uint16_t microphoneSamples[1000];// 1000 microphone samples @ 1kHz = 1 second
+  
+  // Slow sensor frames (camera data)
   uint16_t rgbFrame[4096];        // RGB565 64x64 (8192 bytes)
   uint16_t irFrame[192];          // IR thermal 16x12 (384 bytes)
 } SensorDataPacket;
 #pragma pack()
 
-// DMA-capable buffers (8704 bytes = 1 status + 8603 packet)
+// DMA-capable buffers (padded for new packet structure ~16.6KB)
 uint8_t *rxBuf;
 uint8_t *txBuf;
-const uint16_t SPI_BUFFER_SIZE = 8704;
+const uint16_t SPI_BUFFER_SIZE = 20480;  // 20KB - handles 16.6KB packet + header + margin
+
+// ============ High-Speed Sampling Ring Buffers (1kHz) ============
+// 5000-sample buffer = 5 seconds of continuous data @ 1kHz
+// Large buffer prevents race condition: sampler index always moves far ahead of read position
+const int RING_BUFFER_SIZE = 5000;  // 5 seconds of 1kHz data
+int16_t accelX_ring[RING_BUFFER_SIZE] = {0};
+int16_t accelY_ring[RING_BUFFER_SIZE] = {0};
+int16_t accelZ_ring[RING_BUFFER_SIZE] = {0};
+uint16_t microphone_ring[RING_BUFFER_SIZE] = {0};
+volatile int ringBufferIndex = 0;  // Index for next write (no mutex needed - single writer)
 
 // Global sensor data
 static SensorDataPacket currentData = {0};
@@ -98,7 +116,7 @@ void initSPIComm() {
     .sclk_io_num     = SPI_SCK,
     .quadwp_io_num   = -1,
     .quadhd_io_num   = -1,
-    .max_transfer_sz = 16384,
+    .max_transfer_sz = 20480,  // 20KB - supports full 16.6KB packet with DMA chaining
   };
 
   spi_slave_interface_config_t slvcfg = {
@@ -166,17 +184,37 @@ void collectMeasurementData() {
   currentData.ambientLight = ambLight;
   Serial.printf("[Debug] ✓ Ambient light: %d\n", ambLight);
   
-  // 2. Acceleration (use most recent measurement, skip live read due to SPI conflict)
-  Serial.println("[Debug] Step 2: Using cached acceleration...");
-  // NOTE: Live reads during measurement cause hang - shared resources between FSPI and SPI2
-  // Workaround: use cached values from initialization
-  currentData.accelX = (int16_t)(ax * 1000);
-  currentData.accelY = (int16_t)(ay * 1000);
-  currentData.accelZ = (int16_t)(az * 1000);
+  // 2. Grab high-speed accel + mic samples from ring buffer (last 1000 @ 1kHz = 1 second of data)
+  Serial.println("[Debug] Step 2: Snapshot 1000 accel+mic samples from ring buffer...");
+  
+  // Calculate start index (1000 samples back from current write position)
+  // Capture endIdx FIRST - even if sampler advances during copy, we use this snapshot
+  int endIdx = ringBufferIndex;
+  int startIdx = (endIdx - 1000 + RING_BUFFER_SIZE) % RING_BUFFER_SIZE;
+  
+  // Copy 1000 consecutive samples into packet
+  // RACE CONDITION SAFE: 5000-sample buffer is large enough that sampler can't catch up
+  // While copying (20ms max), sampler advances only ~20 positions
+  // With 5000 total slots, there's always massive separation. No overwrite risk!
+  for (int i = 0; i < 1000; i++) {
+    int srcIdx = (startIdx + i) % RING_BUFFER_SIZE;
+    currentData.accelX_samples[i] = accelX_ring[srcIdx];
+    currentData.accelY_samples[i] = accelY_ring[srcIdx];
+    currentData.accelZ_samples[i] = accelZ_ring[srcIdx];
+    currentData.microphoneSamples[i] = microphone_ring[srcIdx];
+  }
+  currentData.accelSampleCount = 1000;  // Full 1 second of 1kHz data
+  
+  // Also store most recent single values for backward compatibility
+  currentData.accelX = accelX_ring[endIdx > 0 ? endIdx - 1 : RING_BUFFER_SIZE - 1];
+  currentData.accelY = accelY_ring[endIdx > 0 ? endIdx - 1 : RING_BUFFER_SIZE - 1];
+  currentData.accelZ = accelZ_ring[endIdx > 0 ? endIdx - 1 : RING_BUFFER_SIZE - 1];
   currentData.gyroX = 0;
   currentData.gyroY = 0;
   currentData.gyroZ = 0;
-  Serial.printf("[Debug] ✓ Accel cached: X=%d Y=%d Z=%d\n", currentData.accelX, currentData.accelY, currentData.accelZ);
+  
+  Serial.printf("[Debug] ✓ Accel+Mic samples: Count=%d (full 1 second), Last=[X:%d Y:%d Z:%d Mic:%d]\n", 
+    1000, currentData.accelX, currentData.accelY, currentData.accelZ, microphone_ring[endIdx > 0 ? endIdx - 1 : RING_BUFFER_SIZE - 1]);
   
   // 3. IR temperature frame (medium, ~300ms at 4Hz)
   Serial.println("[Debug] Step 3: Measuring IR thermal...");
@@ -197,19 +235,41 @@ void collectMeasurementData() {
   Serial.println("[Debug] Step 4: Capturing RGB frame...");
   camera_fb_t *fb = esp_camera_fb_get();
   if (fb) {
-    Serial.printf("[Debug] Camera buffer: %dx%d\n", fb->width, fb->height);
+    Serial.printf("[Debug] Camera buffer: %dx%d | Cropping to 64x64 center...\n", fb->width, fb->height);
     int startX = (fb->width - 64) / 2;
     int startY = (fb->height - 64) / 2;
+    Serial.printf("[Debug] Crop offset: X=%d Y=%d\n", startX, startY);
     
     int idx = 0;
+    uint16_t rgbMin = 65535, rgbMax = 0;
+    uint32_t rgbSum = 0;
+    
     for (int row = 0; row < 64; row++) {
       for (int col = 0; col < 64; col++) {
         int src = ((startY + row) * fb->width + (startX + col)) * 2;
-        currentData.rgbFrame[idx++] = (fb->buf[src] << 8) | fb->buf[src + 1];
+        uint16_t pixel = (fb->buf[src] << 8) | fb->buf[src + 1];
+        currentData.rgbFrame[idx++] = pixel;
+        
+        // Track statistics
+        if (pixel < rgbMin) rgbMin = pixel;
+        if (pixel > rgbMax) rgbMax = pixel;
+        rgbSum += pixel;
       }
     }
+    
+    // Calculate statistics
+    uint16_t rgbAvg = rgbSum / 4096;
+    Serial.printf("[Debug] ✓ RGB frame captured: Min=0x%04X Max=0x%04X Avg=0x%04X\n", rgbMin, rgbMax, rgbAvg);
+    
+    // Sample first few pixels for debugging
+    Serial.print("[Debug] RGB sample (first 8 pixels): ");
+    for (int i = 0; i < 8; i++) {
+      Serial.printf("0x%04X ", currentData.rgbFrame[i]);
+    }
+    Serial.println();
+    
     esp_camera_fb_return(fb);
-    Serial.println("[Debug] ✓ RGB frame captured");
+    Serial.println("[Debug] ✓ RGB frame captured (64×64 center crop stored)");
   } else {
     Serial.println("[Debug] ✗ Camera buffer NULL!");
   }
@@ -250,6 +310,39 @@ static void measurementCollectorTask(void *pvParameters) {
     }
     
     taskYIELD();  // Let other tasks run
+  }
+}
+
+// ============ High-Speed Sampler Task (1kHz on Core 0) ============
+// Runs independently, sampling accel + mic every 1ms
+// Results stored in ring buffers (no mutex needed - single writer)
+static void highSpeedSamplerTask(void *pvParameters) {
+  TickType_t lastWakeTime = xTaskGetTickCount();
+  
+  Serial.println("[HighSpeedSampler] ⚙️ Started - Sampling accel + mic @ 1kHz");
+  
+  while (1) {
+    // Precise 1ms timing using vTaskDelayUntil
+    vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(1));
+    
+    // Read acceleration (FSPI)
+    readAcceleration();
+    
+    // Read microphone (ADC - very fast)
+    measureMicrophone();
+    
+    // Store in ring buffer (atomic write, single writer)
+    int idx = ringBufferIndex;
+    accelX_ring[idx] = (int16_t)(ax * 1000);
+    accelY_ring[idx] = (int16_t)(ay * 1000);
+    accelZ_ring[idx] = (int16_t)(az * 1000);
+    microphone_ring[idx] = microphone;
+    
+    // Advance ring buffer index
+    ringBufferIndex = (ringBufferIndex + 1) % RING_BUFFER_SIZE;
+    
+    // Yield to allow other tasks (especially idle task for watchdog) to run
+    taskYIELD();
   }
 }
 
@@ -390,11 +483,27 @@ void startMeasurementTask() {
   xTaskCreatePinnedToCore(
     measurementCollectorTask,
     "MeasurementCollector",
-    8192,           // Stack size (8 KB)
+    20480,          // Stack size (20 KB) - generous headroom for camera + thermal library operations
     NULL,           // Parameters
-    2,              // Priority (higher than SPI handler's priority 1)
+    2,              // Priority (higher than high-speed sampler)
     &measurementTaskHandle,
     0               // Core 0
   );
   Serial.println("[Slave] Measurement task created on Core 0");
+}
+
+// Start the high-speed sampler task (continuous 1kHz accel + mic sampling)
+void startHighSpeedSamplerTask() {
+  static TaskHandle_t samplerTaskHandle = NULL;
+  
+  xTaskCreatePinnedToCore(
+    highSpeedSamplerTask,
+    "HighSpeedSampler",
+    8192,           // Stack size (8 KB - safe for SPI + ADC operations)
+    NULL,           // Parameters
+    1,              // Priority (low - won't interfere with SPI handler)
+    &samplerTaskHandle,
+    1               // Core 1 (dedicated to sampling, Core 0 free for SPI + measurement)
+  );
+  Serial.println("[Slave] High-speed sampler task created on Core 1 @ 1kHz");
 }

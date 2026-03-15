@@ -7,11 +7,13 @@
 #include "MLX90641.h"
 
 extern uint16_t ambLight;
+extern uint16_t microphone;  // Microphone ADC reading
 extern float ax,ay,az;
 extern MLX90641 myIRcam;
 
 // Measurement functions (called on-demand)
 void measureAmbLight();
+void measureMicrophone();     // Read microphone ADC
 void measureIRTemp();
 void readAcceleration();
 void measureCamera();
