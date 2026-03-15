@@ -1,301 +1,146 @@
-# HydroCare Master-Slave SPI Protocol Specification
+# HydroCare SPI Protocol
 
-## Overview
-Master-Slave SPI protocol using address-based read/write operations for register and bulk data transfer.
-Master initiates ALL communication. Slave ONLY responds to commands received.
-
-## SPI Configuration
-- **Clock Speed:** 10 MHz
-- **Bit Order:** MSBFIRST
-- **Mode:** SPI_MODE0 (CPOL=0, CPHA=0)
-- **Chip Select:** Active LOW
-- **DMA Buffer Size:** 20KB
-- **Address Space:** 7-bit (0x00 - 0x7F = 128 addressable locations)
-
----
-
-## Protocol: Command Byte Format
-
-### Byte 0: Command + Address
+## Hardware Configuration
 ```
-Bit 7: R/W flag
-  1 = READ operation (master requests data from slave)
-  0 = WRITE operation (master sends data to slave)
-
-Bits 6-0: Address (0-127)
-  Determines which register/memory slave returns/writes
+Clock:        10 MHz
+Mode:         SPI_MODE0 (CPOL=0, CPHA=0)  
+Bit Order:    MSBFIRST
+CS:           Active LOW
+DMA Buffer:   20 KB
+Address Space: 0x00-0x7F (128 locations, 7-bit)
 ```
 
-**In Code:**
+## Command Byte Format
+```
+Bit 7:     R/W flag (1=READ, 0=WRITE)
+Bits 6-0:  Address (0x00-0x7F)
+```
+
+Code constants:
 ```c
-#define PROTO_CMD_READ  0x80    // R/W=1
-#define PROTO_CMD_WRITE 0x00    // R/W=0
-#define PROTO_ADDR_MASK 0x7F    // Lower 7 bits
-
-cmdByte = PROTO_CMD_READ | (address & PROTO_ADDR_MASK);  // Build command
+#define PROTO_CMD_READ   0x80
+#define PROTO_CMD_WRITE  0x00
+#define PROTO_ADDR_MASK  0x7F
 ```
-
----
 
 ## Address Map
 
-### Read-Only Addresses (Slave responses)
-| Address | Name | Size | Purpose |
-|---------|------|------|---------|
-| 0x00 | ADDR_SENSOR_DATA | 20480 bytes | Bulk sensor data packet (>20KB) |
-| 0x01 | ADDR_STATUS | 1 byte | Status register (measurement/lock state) |
-| 0x05 | ADDR_AMB_LIGHT | 1 byte | Ambient light level |
+| Addr | Name | Type | Size | Purpose |
+|------|------|------|------|---------|
+| 0x00 | ADDR_SENSOR_DATA | Read | 20480 B | Bulk sensor packet (pre-prepared) |
+| 0x01 | ADDR_STATUS | Read | 1 B | Status register (constantly updated) |
+| 0x02 | ADDR_CTRL | Write | 1 B | Control: 0x01=trigger, 0x02=lock |
+| 0x03 | ADDR_IR_LED | Write | 1 B | IR LED: 0x01=on, 0x00=off |
+| 0x04 | ADDR_BRIGHTNESS | Write | 1 B | LED brightness 0-100% |
+| 0x05 | ADDR_AMB_LIGHT | Read | 1 B | Ambient light level |
 
-### Write-Only Addresses (Master commands)
-| Address | Name | Size | Value | Purpose |
-|---------|------|------|-------|---------|
-| 0x02 | ADDR_CTRL | 1 byte | 0x01 | Trigger measurement |
-| 0x02 | ADDR_CTRL | 1 byte | 0x02 | Lock buffers |
-| 0x03 | ADDR_IR_LED | 1 byte | 0x01/0x00 | Turn IR LED on/off |
-| 0x04 | ADDR_BRIGHTNESS | 1 byte | 0-100 | LED brightness (%) |
-
-### Control Register Values (ADDR_CTRL = 0x02)
+Status bits:
 ```c
-#define CTRL_TRIGGER_MEASUREMENT 0x01
-#define CTRL_LOCK_BUFFERS 0x02
+#define STATUS_MEASURING 0x01      // Measurement in progress
+#define STATUS_MEASURED 0x02       // Measurement complete  
+#define STATUS_LOCKED 0x04         // Buffers locked & data prefilled
 ```
 
-### Status Register Values (ADDR_STATUS = 0x01)
-```c
-#define STATUS_MEASURING 0x01        // Measurement in progress
-#define STATUS_MEASURED 0x02         // Measurement complete
-#define STATUS_LOCKED 0x04           // Buffers locked for transfer
-#define STATUS_READY_TRANSFER 0x08   // Data ready to transfer
+## Transaction Formats
+
+### Single Byte Read (2 bytes total)
 ```
-
----
-
-## Single Byte Read (e.g., status register)
-
+Byte 0: Master sends [R/W=1 | ADDR]  ← Slave sends DUMMY (discard)
+Byte 1: Master sends 0x00            ← Slave sends DATA/STATUS
 ```
-Master Action              | Slave Action                | Notes
---------------------------|---------------------------|-------------------
-1. Pull CS LOW             | Prepare response            |
-2. Send [R/W=1|ADDR]       | Receive command             | Slave stores command
-   (Master receives GARBAGE)| (not ready to respond yet)  |
-3. Send dummy 0x00 byte    | Send data byte              | Master clocks data out
-   (Master receives DATA)   | Device sends actual response|
-4. Pull CS HIGH            | Processing complete         |
+Master receives the actual data at byte 1.
+
+### Single Byte Write (3 bytes total)  
 ```
-
-**Example: Read status register (ADDR_STATUS = 0x01)**
+Byte 0: Master sends [R/W=0 | ADDR]  ← Slave sends DUMMY (discard)
+Byte 1: Master sends 0x00            ← Slave sends STATUS
+Byte 2: Master sends DATA            ← Slave sends ACK (discard)
 ```
-Byte 0: Master sends 0x81 (R/W=1, ADDR=0x01)
-        Master receives: GARBAGE (discard)
-        
-Byte 1: Master sends 0x00 (dummy clock)
-        Master receives: STATUS value from slave
+Slave processes write after CS goes HIGH.
+
+### Bulk Read - 20KB (20482 bytes total)
 ```
-
----
-
-## Single Byte Write (e.g., LED brightness)
-
+Byte 0: Master sends [R/W=1 | ADDR]  ← Slave sends DUMMY (discard)
+Byte 1: Master sends 0x00            ← Slave sends STATUS
+Bytes 2-20481: Master sends 0x00 stream  ← Slave sends pre-prepared data
 ```
-Master Action              | Slave Action                | Notes
---------------------------|---------------------------|-------------------
-1. Pull CS LOW             | Prepare to receive          |
-2. Send [R/W=0|ADDR]       | Receive command             | Slave stores address
-   (Master receives GARBAGE)| Prepare for data            |
-3. Send DATA byte          | Receive and store data      | Slave processes write
-   (Master receives GARBAGE)| Execute write operation     |
-4. Pull CS HIGH            | Writing complete            |
-```
+All sensor data pre-filled in slave buffer before transaction.
 
-**Example: Set LED brightness to 50% (ADDR_BRIGHTNESS = 0x04)**
-```
-Byte 0: Master sends 0x04 (R/W=0, ADDR=0x04)
-        Master receives: GARBAGE (discard)
-        
-Byte 1: Master sends 0x32 (50 decimal)
-        Master receives: GARBAGE (discard)
-        Slave stores: brightness = 50
-```
+## Sensor Data Packet
 
----
-
-## Bulk Read (for large sensor data transfer)
-
-Used for reading large data packets (>20KB) like compressed sensor readings.
-
-```
-Master Action              | Slave Action                | Notes
---------------------------|---------------------------|-------------------
-1. Pull CS LOW             | Prepare large data buffer   |
-2. Send [R/W=1|ADDR_0]     | Receive command             | Slave prepares data
-   (Master receives GARBAGE)|Prepare streaming           |
-3. Loop: Send 0x00 bytes   | Loop: Send data bytes       | Continuous stream
-   (Master receives DATA)   |while bytes_remaining       |until N bytes sent
-4. Pull CS HIGH            | Transfer complete           |
-```
-
-**Example: Read sensor data (ADDR_SENSOR_DATA = 0x00, 20480 bytes)**
-```
-Byte 0: Master sends 0x80 (R/W=1, ADDR=0x00)
-        Master receives: GARBAGE (discard)
-        Slave recognizes ADDR_SENSOR_DATA read request
-        Slave prepares to stream sensor packet
-
-Bytes 1-20480: Master sends dummy 0x00 bytes (one per byte)
-               Master receives actual sensor data continuously
-               
-Example byte stream:
-  Master sends:  0x00 0x00 0x00 0x00 0x00 ...
-  Slave sends:   0x01 0x42 0x03 0x18 0xFF ...  (sensor packet data)
-  Master gets:   0x01 0x42 0x03 0x18 0xFF ...  (all 20480 bytes)
-```
-
----
-
-## Sensor Data Packet Structure
-
-Sent when master reads from ADDR_SENSOR_DATA (address 0x00).
-
+Returned by bulk read (address 0x00):
 ```c
 #pragma pack(1)
 typedef struct {
   // Metadata (31 bytes)
-  uint16_t sequence;              // Packet sequence number
-  uint16_t ambientLight;          // Ambient light value
-  float temperature;              // Temperature in °C
-  float humidity;                 // Humidity %
-  int16_t accelX, accelY, accelZ; // IMU accel
-  int16_t gyroX, gyroY, gyroZ;    // IMU gyro
-  uint32_t timestamp_ms;          // System uptime
-  uint8_t status;                 // Status flags
-  uint16_t accelSampleCount;      // Sample count (1000)
+  uint16_t sequence;
+  uint16_t ambientLight;
+  float temperature;
+  float humidity;
+  int16_t accelX, accelY, accelZ;
+  int16_t gyroX, gyroY, gyroZ;
+  uint32_t timestamp_ms;
+  uint8_t status;
+  uint16_t accelSampleCount;
   
-  // High-speed samples (8000 bytes)
-  int16_t accelX_samples[1000];   // 1kHz accel X
-  int16_t accelY_samples[1000];   // 1kHz accel Y
-  int16_t accelZ_samples[1000];   // 1kHz accel Z
-  uint16_t microphoneSamples[1000]; // 1kHz microphone
+  // Samples (8000 bytes) - 1kHz data
+  int16_t accelX_samples[1000];
+  int16_t accelY_samples[1000];
+  int16_t accelZ_samples[1000];
+  uint16_t microphoneSamples[1000];
   
-  // Camera frames (8576 bytes)
-  uint16_t rgbFrame[4096];        // RGB565 64x64 image
-  uint16_t irFrame[192];          // IR thermal 16x12 image
-} SensorDataPacket;  // Total: ~8.7KB
+  // Frames (8576 bytes)
+  uint16_t rgbFrame[4096];     // 64×64 RGB565
+  uint16_t irFrame[192];       // 16×12 thermal
+} SensorDataPacket;  // Total: 16,607 bytes
 #pragma pack()
 ```
 
----
+## Master Sequence (Sensor Acquisition)
 
-## State Machine Flow (Sensor Acquisition)
+1. **TRIGGER**: `spiWrite(ADDR_CTRL, 0x01)` → Slave sets STATUS_MEASURING
+2. **POLL** (2 sec timeout): `status = spiRead(ADDR_STATUS)` → Wait for STATUS_MEASURED
+3. **LOCK**: `spiWrite(ADDR_CTRL, 0x02)` → Slave locks buffers and pre-prepares data
+4. **POLL** (2 sec timeout): `status = spiRead(ADDR_STATUS)` → Wait for STATUS_LOCKED
+5. **READ**: `spiReadBulk(ADDR_SENSOR_DATA, buffer, 20480)` → Get pre-prepared packet
 
-### Master-Side Flow
+## Slave Sequence (SYNCHRONOUS)
+
 ```
-1. TRIGGER MEASUREMENT
-   └─ Write 0x01 to ADDR_CTRL (0x02)
-   
-2. POLL STATUS
-   └─ Read ADDR_STATUS (0x01) repeatedly
-   └─ Wait for STATUS_MEASURED bit set (timeout: 2 sec)
-   
-3. LOCK BUFFERS
-   └─ Write 0x02 to ADDR_CTRL (0x02)
-   
-4. POLL STATUS AGAIN
-   └─ Read ADDR_STATUS (0x01) repeatedly
-   └─ Wait for STATUS_LOCKED bit set (timeout: 2 sec)
-   
-5. READ SENSOR DATA
-   └─ Bulk read from ADDR_SENSOR_DATA (0x00)
-   └─ Read 20480 bytes continuously
-   └─ Parse SensorDataPacket from received data
+IDLE
+  ↓ Trigger command received
+MEASURING ← Set STATUS_MEASURING, start measurement hardware
+  ↓ Measurement complete (hardware done)
+MEASURED ← Set STATUS_MEASURED, master will poll this
+  ↓ Lock command received
+LOCKED ← Set STATUS_LOCKED, PRE-PREPARE all sensor data to buffer
+  ↓ Master bulk read starts
+TRANSFERRING ← Stream pre-prepared data bytes (no computation)
+  ↓ CS HIGH
+  → Ready for next cycle
 ```
 
-### Slave-Side Flow (IMPORTANT for implementation)
-```
-IDLE STATE:
-  └─ Listen for incoming SPI command byte [R/W | ADDRESS]
-  
-ON READ REQUEST (R/W=1):
-  ├─ If ADDRESS == 0x00 (SENSOR_DATA):
-  │  └─ Send prepared sensor packet (20480 bytes)
-  │
-  ├─ If ADDRESS == 0x01 (STATUS):
-  │  └─ Send 1-byte status register
-  │
-  └─ If ADDRESS == 0x05 (AMB_LIGHT):
-     └─ Send 1-byte ambient light value
+**Key: All data pre-filled AFTER lock command, just stream during transfer.**
 
-ON WRITE REQUEST (R/W=0):
-  ├─ If ADDRESS == 0x02 (CTRL):
-  │  ├─ If DATA == 0x01: Start measurement (set STATUS_MEASURING)
-  │  └─ If DATA == 0x02: Lock buffers (set STATUS_LOCKED)
-  │
-  ├─ If ADDRESS == 0x03 (IR_LED):
-  │  └─ Control IR LED on/off
-  │
-  └─ If ADDRESS == 0x04 (BRIGHTNESS):
-     └─ Set LED brightness value
-```
+## Implementation Rules
 
----
+**Master:**
+- Always set CS HIGH between transactions
+- Discard first byte in all transactions (it's garbage)
+- Use 2 second timeouts when polling STATUS
+- Maximum address: 0x7F
 
-## Critical Implementation Notes
-
-### For Slave Developer
-1. **Master sends FIRST** - Slave never initiates SPI communication
-2. **First byte is always garbage** - Discard the response to the command byte
-3. **Slave responds on next clock** - When master sends dummy bytes (0x00), that's when slave sends real data
-4. **Keep it stateless for now** - Just read command byte, prepare response, send on next byte clock
-5. **No handshaking** - Don't send status bytes; just send data
-
-### For Master Developer
-1. Always pull CS HIGH between transactions
-2. Discard first byte in bulk reads (command echo)
-3. Use proper timeouts when polling status (2 second timeout)
-4. Validate address space (max 0x7F)
-5. Don't send more bytes than buffer size (20KB max)
-
----
-
-## Example C Code
-
-### Master: Read Status Register
-```cpp
-uint8_t status = spiRead(ADDR_STATUS);  // Reads 1 byte from address 0x01
-// Returns STATUS bits: MEASURING, MEASURED, LOCKED, etc.
-```
-
-### Master: Trigger Measurement
-```cpp
-spiWrite(ADDR_CTRL, CTRL_TRIGGER_MEASUREMENT);  // Write 0x01 to address 0x02
-// Slave enters measurement state
-```
-
-### Master: Read Sensor Data
-```cpp
-uint8_t buffer[SPI_BUFFER_SIZE];
-spiReadBulk(ADDR_SENSOR_DATA, buffer, SPI_BUFFER_SIZE);  // Read 20KB from address 0x00
-SensorDataPacket* packet = (SensorDataPacket*)(buffer);
-// Parse packet data
-```
-
----
+**Slave:**
+- Master sends FIRST (never initiate)
+- Always respond with DUMMY at byte 0
+- Keep STATUS register constantly updated (background task)
+- Pre-prepare sensor data AFTER lock command, then stream it
+- No interrupts or async during transactions (fully synchronous)
 
 ## Timing
 
-- **Single read/write:** ~2µs per byte + delays
-- **Bulk read (20KB):** ~2ms at 10MHz + overhead
-- **Status polling:** 100ms interval × 2 sec timeout = up to 20 polls
-- **Full measurement cycle:** ~2 sec (measurement) + 200ms (polling) + 2ms (read)
-
----
-
-## Differences from Old Protocol
-
-| Feature | Old | New |
-|---------|-----|-----|
-| Command style | Fixed opcodes (0x01, 0x02, etc.) | Address-based R/W |
-| Registers | N/A | 7-bit address space (128 locations) |
-| Data handling | Status byte always sent | Clean separation: cmd then data |
-| Bulk transfer | Hardcoded CMD_TRANSFER_DATA | Generic address 0x00 |
-| Flexibility | Limited | Easy to add new registers |
+- Single read: ~100 µs (including CS delays)
+- Single write: ~150 µs (including CS delays)
+- Bulk read 20KB: ~2 ms (at 10 MHz)
+- Full measurement: ~2 sec (hardware) + 200 ms (polling) + 2 ms (transfer)
 

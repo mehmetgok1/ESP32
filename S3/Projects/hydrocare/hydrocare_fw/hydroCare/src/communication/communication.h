@@ -71,7 +71,6 @@ typedef struct {
 #define STATUS_MEASURING 0x01
 #define STATUS_MEASURED 0x02
 #define STATUS_LOCKED 0x04
-#define STATUS_READY_TRANSFER 0x08
 
 // Function prototypes
 void initSPIComm();

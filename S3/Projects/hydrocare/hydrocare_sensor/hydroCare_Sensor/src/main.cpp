@@ -21,11 +21,6 @@ void setup() {
 }
 
 void loop() {
-  // SPI Handler: Process commands from master
-  // Runs continuously on Core 1, fast and non-blocking
-  // When TRIGGER arrives, it signals the measurement task and returns immediately
-  // High-speed sampler runs independently on Core 0 every 1ms
-  // Measurement task runs on Core 0 when triggered
   receiveCommand();
 }
 

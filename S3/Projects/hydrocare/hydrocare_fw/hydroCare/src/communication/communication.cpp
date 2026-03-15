@@ -57,13 +57,12 @@ void initSPIComm() {
 
 // Single byte READ from slave register/memory address
 // 
-// Protocol sequence:
-// 1. Master sends: [R/W=1 | Address]  <- Slave receives and prepares response
-//    Master receives: GARBAGE (discard)
-// 2. Master sends: 0x00               <- Just clocking to read slave's data
-//    Master receives: actual data from slave
+// Synchronous 2-byte protocol:
+// Byte 0: Master sends [R/W=1 | Address]  <- Slave sends DUMMY
+// Byte 1: Master sends 0x00 (dummy)       <- Slave sends DATA/STATUS
 //
-// Returns: Data byte from slave
+// Status is always at byte 1 in slave response!
+// Returns: Data/Status value from slave (byte 1 of transaction)
 uint8_t spiRead(uint8_t address) {
   if (address > 0x7F) {
     Serial.printf("[SPI Error] Read address 0x%02X exceeds 7-bit space\n", address);
@@ -76,10 +75,10 @@ uint8_t spiRead(uint8_t address) {
   digitalWrite(SPI_CS, LOW);
   delayMicroseconds(50);
   
-  // Master sends command, discard garbage response
+  // Byte 0: Master sends command, discard slave's dummy response
   spi.transfer(cmdByte);
   
-  // Master sends dummy byte (0x00), slave sends actual data
+  // Byte 1: Master sends dummy (0x00), slave sends DATA/STATUS
   uint8_t readData = spi.transfer(0x00);
   
   delayMicroseconds(20);
@@ -91,11 +90,12 @@ uint8_t spiRead(uint8_t address) {
 
 // Single byte WRITE to slave register/memory address
 //
-// Protocol sequence:
-// 1. Master sends: [R/W=0 | Address]  <- Slave receives command
-//    Master receives: GARBAGE (discard)
-// 2. Master sends: Data byte          <- Slave receives and writes data
-//    Master receives: GARBAGE (discard)
+// Synchronous 3-byte protocol:
+// Byte 0: Master sends [R/W=0 | Address]  <- Slave sends DUMMY
+// Byte 1: Master sends 0x00 (dummy)       <- Slave sends STATUS
+// Byte 2: Master sends WRITE DATA         <- Slave sends DUMMY/ACK
+//
+// Note: Slave processes write AFTER CS goes HIGH (blocking, synchronous)
 //
 void spiWrite(uint8_t address, uint8_t data) {
   if (address > 0x7F) {
@@ -109,27 +109,35 @@ void spiWrite(uint8_t address, uint8_t data) {
   digitalWrite(SPI_CS, LOW);
   delayMicroseconds(50);
   
-  // Master sends write command+address, discard garbage
+  // Byte 0: Master sends write command+address, discard dummy
   spi.transfer(cmdByte);
   
-  // Master sends data, slave receives and stores it
+  // Byte 1: Master sends dummy (0x00), slave sends STATUS
+  uint8_t statusByte = spi.transfer(0x00);
+  
+  // Byte 2: Master sends actual WRITE DATA, slave sends ACK/DUMMY
   spi.transfer(data);
   
   delayMicroseconds(20);
   digitalWrite(SPI_CS, HIGH);
   spi.endTransaction();
+  
+  // Slave now processes the write (after CS HIGH)
 }
 
 // Bulk READ from slave (for large transfers like sensor data)
 //
-// Protocol sequence:
-// 1. Master sends: [R/W=1 | Address]  <- Slave receives command, prepares data
+// Synchronous protocol with pre-prepared data:
+// 1. Master sends: [R/W=1 | Address]  <- Slave sends DUMMY
 //    Master receives: GARBAGE (discard)
-// 2. Master sends: dummy bytes (0x00) <- Slave sends data continuously
-//    Master receives: actual data payload
+// 2. Master sends: 0x00               <- Slave sends STATUS
+//    Master receives: STATUS byte
+// 3. Master loop: Send 0x00 bytes     <- Slave sends pre-prepared data
+//    Master receives: actual bulk data (bytes 2 onwards)
 //
-// Special case: address=0 (ADDR_SENSOR_DATA) triggers large sensor packet read (>20KB)
-// Slave handles fragmented transfers - can call multiple times for mega-transfers
+// Special case: address=0 (ADDR_SENSOR_DATA) reads pre-prepared sensor packet
+// Slave has prepared all data BEFORE this transaction (during LOCK command)
+//
 void spiReadBulk(uint8_t address, uint8_t *buffer, uint16_t numBytes) {
   if (address > 0x7F) {
     Serial.printf("[SPI Error] Read address 0x%02X exceeds 7-bit space\n", address);
@@ -152,10 +160,14 @@ void spiReadBulk(uint8_t address, uint8_t *buffer, uint16_t numBytes) {
   digitalWrite(SPI_CS, LOW);
   delayMicroseconds(50);
   
-  // Master sends command, discard garbage response
+  // Byte 0: Master sends command, discard slave's dummy
   spi.transfer(cmdByte);
   
-  // Master sends dummy bytes, slave sends actual data continuously
+  // Byte 1: Master sends dummy (0x00), slave sends STATUS
+  uint8_t statusByte = spi.transfer(0x00);
+  
+  // Bytes 2 onwards: Master clocks in actual data
+  // Slave streams pre-prepared data continuously (no processing needed!)
   for (uint16_t i = 0; i < numBytes; i++) {
     buffer[i] = spi.transfer(0x00);
   }
@@ -163,6 +175,8 @@ void spiReadBulk(uint8_t address, uint8_t *buffer, uint16_t numBytes) {
   delayMicroseconds(20);
   digitalWrite(SPI_CS, HIGH);
   spi.endTransaction();
+  
+  Serial.printf("[SPI] Bulk read status: 0x%02X | %u bytes received\n", statusByte, numBytes);
 }
 
 // ==================== CONVENIENCE FUNCTIONS ====================
@@ -233,22 +247,25 @@ void readSlaveData() {
   // ========== STEP 5: Bulk Read Sensor Data ==========
   Serial.println("[Master] Step 5: Reading bulk sensor data from address 0...");
   
-  uint8_t dataBuffer[SPI_BUFFER_SIZE];
-  memset(dataBuffer, 0, SPI_BUFFER_SIZE);
-  
-  spiReadBulk(ADDR_SENSOR_DATA, dataBuffer, SPI_BUFFER_SIZE);
+  // Use heap-allocated buffer (spiRxBuffer) instead of stack to avoid stack overflow
+  // spiReadBulk returns:
+  // [0]: Pre-prepared sensor data byte 0 (actual packet data)
+  // [1]: Pre-prepared sensor data byte 1
+  // ... etc
+  // NOTE: Status is logged inside spiReadBulk, we get pure sensor data back
+  spiReadBulk(ADDR_SENSOR_DATA, spiRxBuffer, SPI_BUFFER_SIZE);
   
   Serial.printf("[Master] Received %u bytes of sensor data\n", SPI_BUFFER_SIZE);
   
-  // Debug header
+  // Debug header - these are sensor data bytes, not protocol overhead
   Serial.printf("[Debug] Raw buffer [0-15]: ");
   for (int i = 0; i < 16; i++) {
-    Serial.printf("%02X ", dataBuffer[i]);
+    Serial.printf("%02X ", spiRxBuffer[i]);
   }
   Serial.println();
   
-  // Cast packet directly (data starts at byte 0)
-  SensorDataPacket *packet = (SensorDataPacket*)(dataBuffer);
+  // Cast packet directly (data starts at byte 0 - pure sensor packet)
+  SensorDataPacket *packet = (SensorDataPacket*)(spiRxBuffer);
   
   // Verify packet integrity
   Serial.printf("[Packet] Sequence: %u | Temp: %.1f°C | Humidity: %.1f%% | Light: %u\n",
@@ -285,6 +302,20 @@ void readSlaveData() {
     Serial.printf("[1kHz Accel Stats] Y: avg=%+.1f min=%+d max=%+d\n", avgY, minY, maxY);
     Serial.printf("[1kHz Accel Stats] Z: avg=%+.1f min=%+d max=%+d\n", avgZ, minZ, maxZ);
   }
+  
+  // Microphone statistics
+  uint16_t micMin = 65535, micMax = 0;
+  uint32_t micSum = 0;
+  for (int i = 0; i < 1000; i++) {
+    if (packet->microphoneSamples[i] < micMin) micMin = packet->microphoneSamples[i];
+    if (packet->microphoneSamples[i] > micMax) micMax = packet->microphoneSamples[i];
+    micSum += packet->microphoneSamples[i];
+  }
+  uint16_t micAvg = micSum / 1000;
+  Serial.printf("[Microphone] Avg=%u | Min=%u Max=%u | Sample[0-4]: %u %u %u %u %u\n", 
+    micAvg, micMin, micMax, 
+    packet->microphoneSamples[0], packet->microphoneSamples[1], packet->microphoneSamples[2], 
+    packet->microphoneSamples[3], packet->microphoneSamples[4]);
   
   // Frame statistics (RGB & IR)
   uint16_t rgbMin = 65535, rgbMax = 0;

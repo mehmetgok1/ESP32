@@ -11,53 +11,13 @@
 #include <freertos/event_groups.h>
 #include <freertos/semphr.h>
 
-// Protocol commands (match SLAVE_PROTOCOL.md)
-#define CMD_NONE 0x00
-#define CMD_TRIGGER_MEASUREMENT 0x01
-#define CMD_LOCK_BUFFERS 0x02
-#define CMD_TRANSFER_DATA 0x03
-
-// LED control commands (can run anytime, independent of measurement state)
-#define CMD_LED_BRIGHTNESS 0xF0    // Set power LED brightness (0-100%)
-#define CMD_IR_LED 0xF1            // Control IR LED (0=off, 1=on)
-#define CMD_READ_AMB_LIGHT 0xF2    // Read ambient light value
-
-// Slave status bits
-#define STATUS_MEASURING 0x01
-#define STATUS_MEASURED 0x02
-#define STATUS_LOCKED 0x04
-#define STATUS_READY_TRANSFER 0x08
-
-// Sensor data packet structure with high-speed samples (~16.6KB)
-#pragma pack(1)
-typedef struct {
-  // Metadata
-  uint16_t sequence;              // Packet sequence number
-  uint16_t ambientLight;          // Ambient light value (instantaneous)
-  float temperature;              // Temperature in °C (average)
-  float humidity;                 // Humidity % (average)
-  int16_t accelX, accelY, accelZ; // IMU accel (most recent single sample)
-  int16_t gyroX, gyroY, gyroZ;    // IMU gyro (unused, zeros)
-  uint32_t timestamp_ms;          // System uptime when measurement triggered
-  uint8_t status;                 // Status flags
-  uint16_t accelSampleCount;      // Number of accel/mic samples in this packet (1000)
-  
-  // High-speed samples (1kHz sampling over 1 second measurement window)
-  int16_t accelX_samples[1000];    // 1000 accel X samples @ 1kHz = 1 second
-  int16_t accelY_samples[1000];    // 1000 accel Y samples @ 1kHz = 1 second
-  int16_t accelZ_samples[1000];    // 1000 accel Z samples @ 1kHz = 1 second
-  uint16_t microphoneSamples[1000];// 1000 microphone samples @ 1kHz = 1 second
-  
-  // Slow sensor frames (camera data)
-  uint16_t rgbFrame[4096];        // RGB565 64x64 (8192 bytes)
-  uint16_t irFrame[192];          // IR thermal 16x12 (384 bytes)
-} SensorDataPacket;
-#pragma pack()
-
-// DMA-capable buffers (padded for new packet structure ~16.6KB)
+// DMA-capable buffers
 uint8_t *rxBuf;
 uint8_t *txBuf;
-const uint16_t SPI_BUFFER_SIZE = 20480;  // 20KB - handles 16.6KB packet + header + margin
+
+// Global SPI transaction (initialized once, reused for all transactions)
+static spi_slave_transaction_t slaveSpiTransaction = {};
+static uint32_t transaction_count = 0;
 
 // ============ High-Speed Sampling Ring Buffers (1kHz) ============
 // 5000-sample buffer = 5 seconds of continuous data @ 1kHz
@@ -73,14 +33,12 @@ volatile int ringBufferIndex = 0;  // Index for next write (no mutex needed - si
 static SensorDataPacket currentData = {0};
 static uint16_t sequenceNumber = 0;
 
-// State machine
+// State machine - simplified for new protocol
 typedef enum {
-  STATE_IDLE = 0,
-  STATE_MEASURING = 1,
-  STATE_READY_FOR_LOCK = 2,
-  STATE_LOCKED = 3,
-  STATE_READY_FOR_TRANSFER = 4,
-  STATE_ERROR = 5
+  STATE_IDLE = 0,           // No measurement active
+  STATE_MEASURING = 1,      // Measurement in progress
+  STATE_READY_TRANSFER = 2, // Measurement complete, buffers locked, ready to send
+  STATE_ERROR = 3
 } SlaveState;
 
 static SlaveState slaveState = STATE_IDLE;
@@ -116,7 +74,7 @@ void initSPIComm() {
     .sclk_io_num     = SPI_SCK,
     .quadwp_io_num   = -1,
     .quadhd_io_num   = -1,
-    .max_transfer_sz = 20480,  // 20KB - supports full 16.6KB packet with DMA chaining
+    .max_transfer_sz = SPI_BUFFER_SIZE,  // Supports full sensor packet with DMA
   };
 
   spi_slave_interface_config_t slvcfg = {
@@ -143,6 +101,16 @@ void initSPIComm() {
     while(1) delay(1000);
   }
   
+  // Initialize global SPI transaction structure (done once, reused for all transactions)
+  memset(&slaveSpiTransaction, 0, sizeof(spi_slave_transaction_t));
+  slaveSpiTransaction.length    = SPI_BUFFER_SIZE * 8;
+  slaveSpiTransaction.rx_buffer = rxBuf;
+  slaveSpiTransaction.tx_buffer = txBuf;
+  
+  // Pre-fill permanent parts of txBuf
+  txBuf[0] = 0x00;  // Dummy byte (always 0x00)
+  txBuf[1] = 0x00;  // Status byte (updated on state changes)
+  
   Serial.println("[Slave] SPI Ready - Concurrent architecture with background measurement task");
 }
 
@@ -150,21 +118,12 @@ void initSPIComm() {
 uint8_t getStatusByte() {
   uint8_t status = 0x00;
   
-  switch (slaveState) {
-    case STATE_MEASURING:
-      status |= STATUS_MEASURING;
-      break;
-    case STATE_READY_FOR_LOCK:
-      status |= STATUS_MEASURED;
-      break;
-    case STATE_LOCKED:
-      status |= STATUS_LOCKED;
-      break;
-    case STATE_READY_FOR_TRANSFER:
-      status |= STATUS_LOCKED | STATUS_READY_TRANSFER;
-      break;
-    default:
-      break;
+  if (slaveState == STATE_MEASURING) {
+    status = STATUS_MEASURING;
+  } 
+  else if (slaveState == STATE_READY_TRANSFER) {
+    // Buffers locked and ready for read
+    status = STATUS_LOCKED;
   }
   
   return status;
@@ -233,45 +192,56 @@ void collectMeasurementData() {
   
   // 4. RGB camera frame (slow, ~100ms)
   Serial.println("[Debug] Step 4: Capturing RGB frame...");
-  camera_fb_t *fb = esp_camera_fb_get();
-  if (fb) {
-    Serial.printf("[Debug] Camera buffer: %dx%d | Cropping to 64x64 center...\n", fb->width, fb->height);
-    int startX = (fb->width - 64) / 2;
-    int startY = (fb->height - 64) / 2;
-    Serial.printf("[Debug] Crop offset: X=%d Y=%d\n", startX, startY);
-    
-    int idx = 0;
-    uint16_t rgbMin = 65535, rgbMax = 0;
-    uint32_t rgbSum = 0;
-    
-    for (int row = 0; row < 64; row++) {
-      for (int col = 0; col < 64; col++) {
-        int src = ((startY + row) * fb->width + (startX + col)) * 2;
-        uint16_t pixel = (fb->buf[src] << 8) | fb->buf[src + 1];
-        currentData.rgbFrame[idx++] = pixel;
-        
-        // Track statistics
-        if (pixel < rgbMin) rgbMin = pixel;
-        if (pixel > rgbMax) rgbMax = pixel;
-        rgbSum += pixel;
+  
+  // DEBUG MODE: Fill with 0xAAAA pattern
+  if (1) {
+    for (int i = 0; i < 4096; i++) {
+      currentData.rgbFrame[i] = 0xAAAA;
+    }
+    Serial.println("[Debug] ✓ RGB frame filled with 0xAAAA (DEBUG MODE)");
+  }
+  else {
+    // PRODUCTION: Actual camera capture (will restore later)
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (fb) {
+      Serial.printf("[Debug] Camera buffer: %dx%d | Cropping to 64x64 center...\n", fb->width, fb->height);
+      int startX = (fb->width - 64) / 2;
+      int startY = (fb->height - 64) / 2;
+      Serial.printf("[Debug] Crop offset: X=%d Y=%d\n", startX, startY);
+      
+      int idx = 0;
+      uint16_t rgbMin = 65535, rgbMax = 0;
+      uint32_t rgbSum = 0;
+      
+      for (int row = 0; row < 64; row++) {
+        for (int col = 0; col < 64; col++) {
+          int src = ((startY + row) * fb->width + (startX + col)) * 2;
+          uint16_t pixel = (fb->buf[src] << 8) | fb->buf[src + 1];
+          currentData.rgbFrame[idx++] = pixel;
+          
+          // Track statistics
+          if (pixel < rgbMin) rgbMin = pixel;
+          if (pixel > rgbMax) rgbMax = pixel;
+          rgbSum += pixel;
+        }
       }
+      
+      // Calculate statistics
+      uint16_t rgbAvg = rgbSum / 4096;
+      Serial.printf("[Debug] ✓ RGB frame captured: Min=0x%04X Max=0x%04X Avg=0x%04X\n", rgbMin, rgbMax, rgbAvg);
+      
+      // Sample first few pixels for debugging
+      Serial.print("[Debug] RGB sample (first 8 pixels): ");
+      for (int i = 0; i < 8; i++) {
+        Serial.printf("0x%04X ", currentData.rgbFrame[i]);
+      }
+      Serial.println();
+      
+      esp_camera_fb_return(fb);
+      Serial.println("[Debug] ✓ RGB frame captured (64×64 center crop stored)");
+    } else {
+      Serial.println("[Debug] ✗ Camera buffer NULL!");
     }
-    
-    // Calculate statistics
-    uint16_t rgbAvg = rgbSum / 4096;
-    Serial.printf("[Debug] ✓ RGB frame captured: Min=0x%04X Max=0x%04X Avg=0x%04X\n", rgbMin, rgbMax, rgbAvg);
-    
-    // Sample first few pixels for debugging
-    Serial.print("[Debug] RGB sample (first 8 pixels): ");
-    for (int i = 0; i < 8; i++) {
-      Serial.printf("0x%04X ", currentData.rgbFrame[i]);
-    }
-    Serial.println();
-    
-    esp_camera_fb_return(fb);
-    Serial.println("[Debug] ✓ RGB frame captured (64×64 center crop stored)");
-  } else {
-    Serial.println("[Debug] ✗ Camera buffer NULL!");
   }
   
   // 5. Timestamp
@@ -301,12 +271,16 @@ static void measurementCollectorTask(void *pvParameters) {
     if (uxBits & EVENT_TRIGGER_RECEIVED) {
       Serial.println("[Measurement Task] ⚡ Triggered! Starting data collection...");
       
-      // Collect measurement data (this blocks the task, but SPI handler is on different task)
+      // Collect measurement data (this blocks the task, but SPI handler is on different core)
       collectMeasurementData();
       
-      // Update state: data collection complete, ready for lock
-      slaveState = STATE_READY_FOR_LOCK;
-      Serial.println("[Measurement Task] ✓ Data ready, state = READY_FOR_LOCK");
+      // Transition state: measurement complete, ready for LOCK
+      // Update txBuf status to indicate measurement is done
+      txBuf[1] = STATUS_MEASURED;
+      // Don't change state here - master will see STATUS_MEASURED and send LOCK
+      // which will transition to STATE_READY_TRANSFER
+      
+      Serial.println("[Measurement Task] ✓ Data ready, awaiting LOCK command from master");
     }
     
     taskYIELD();  // Let other tasks run
@@ -346,155 +320,120 @@ static void highSpeedSamplerTask(void *pvParameters) {
   }
 }
 
-// ============ Main SPI Command Handler (Fast, Non-Blocking) ============
+// ============ Main SPI Command Handler - Address-Based Protocol ============
+// Called once per transaction. txBuf pre-filled globally on state changes
 void receiveCommand() {
-  static spi_slave_transaction_t t;
-  static uint32_t transaction_count = 0;
+  // ===== STEP 1: EXECUTE SINGLE TRANSACTION (BLOCKING) =====
+  // Global slaveSpiTransaction reused - initialized once in initSPIComm()
+  // txBuf[0] = dummy, txBuf[1] = status (both maintained globally)
+  // txBuf[2+] = sensor data (prefilled after LOCK)
   
-  // Prepare TX buffer: Byte 0 = status
-  uint8_t statusByte = getStatusByte();
+  esp_err_t ret = spi_slave_transmit(SPI2_HOST, &slaveSpiTransaction, 100);
   
-  // **CRITICAL**: Only clear txBuf if NOT in READY_FOR_TRANSFER state
-  // In READY_FOR_TRANSFER, preserve the packet data prepared during LOCK phase
-  if (slaveState != STATE_READY_FOR_TRANSFER) {
-    memset(txBuf, 0, SPI_BUFFER_SIZE);
+  if (ret != ESP_OK) {
+    if (ret == ESP_ERR_TIMEOUT) {
+      return;  // Normal - no master activity yet
+    } else {
+      Serial.printf("[Slave] SPI Error: %s\n", esp_err_to_name(ret));
+      return;
+    }
   }
-  txBuf[0] = statusByte;  // Always update status byte
   
-  // Setup SPI transaction (always 8704 bytes)
-  memset(&t, 0, sizeof(spi_slave_transaction_t));
-  t.length    = SPI_BUFFER_SIZE * 8;  // 8704 bytes in bits
-  t.rx_buffer = rxBuf;
-  t.tx_buffer = txBuf;
-
-  // Debug: Check what's in txBuf BEFORE transmitting
-  if (slaveState == STATE_READY_FOR_TRANSFER) {
-    uint16_t *debugPtr = (uint16_t*)(&txBuf[8032]);
-    Serial.printf("[Debug Pre-TX] State=READY_FOR_TRANSFER, txBuf[8032] RGB: %04X %04X %04X %04X\n",
-      debugPtr[0], debugPtr[1], debugPtr[2], debugPtr[3]);
-  }
-
-  // Wait for master with extended timeout
-  esp_err_t ret = spi_slave_transmit(SPI2_HOST, &t, 100);  // 10-second timeout
+  // ===== STEP 2: PROCESS RECEIVED COMMAND =====
+  transaction_count++;
   
-  if (ret == ESP_OK) {
-    transaction_count++;
+  uint8_t cmdByte = rxBuf[0];
+  uint8_t isRead = (cmdByte & PROTO_CMD_READ) ? 1 : 0;
+  uint8_t address = cmdByte & PROTO_ADDR_MASK;
+  
+  Serial.printf("[Slave] RX #%lu: CMD=0x%02X (ADDR=0x%02X) State=%d | ", 
+    transaction_count, cmdByte, address, slaveState);
     
-    // Read command from byte 0 of received data
-    uint8_t cmd = rxBuf[0];
+    // ========== ADDRESS-BASED DISPATCH (WRITE ONLY) ============
+    // Master sends WRITE commands to control state and prefill txBuf
+    // Master reads prefilled txBuf bytes directly (no special read addressing)
     
-    // Log transaction
-    Serial.printf("[Slave] RX #%lu: CMD=0x%02X Status=0x%02X | ", transaction_count, cmd, statusByte);
-    
-    // ========== COMMAND HANDLING (Fast state transitions, no blocking) ==========
-    
-    // ========== STATE-BASED COMMAND VALIDATION ==========
-    // Only accept commands that make sense in current state
-    // POLL (0x00) and LED commands always OK, reject others if state mismatch
-    
-    if (cmd == CMD_TRIGGER_MEASUREMENT) {
-      if (slaveState == STATE_IDLE) {
-        Serial.println("TRIGGER");
-        slaveState = STATE_MEASURING;
-        measurementStartTime = millis();
+    if (!isRead) {
+      uint8_t dataValue = rxBuf[2];  // Data is in byte 2 (protocol: byte 0=cmd, byte 1=0x00, byte 2=data)
+      
+      if (address == ADDR_CTRL) {
+        // ===== CONTROL REGISTER: Measurement control =====
+        if (dataValue == CTRL_TRIGGER_MEASUREMENT) {
+          Serial.println("WRITE CTRL: TRIGGER_MEASUREMENT");
+          
+          // Accept from IDLE or READY_TRANSFER (allows seamless re-trigger after measurement)
+          if (slaveState == STATE_IDLE || slaveState == STATE_READY_TRANSFER) {
+            slaveState = STATE_MEASURING;
+            measurementStartTime = millis();
+            
+            // Update txBuf status (now measuring)
+            txBuf[1] = STATUS_MEASURING;
+            
+            // Signal background measurement task
+            xEventGroupSetBits(spiEventGroup, EVENT_TRIGGER_RECEIVED);
+            
+            Serial.println("[SPI] ✓ Measurement triggered");
+          } else {
+            Serial.printf("ERROR: TRIGGER in state %d (ignore)\n", slaveState);
+          }
+        }
         
-        // Signal background measurement task to start collecting data
-        // This returns IMMEDIATELY - SPI handler doesn't block
-        xEventGroupSetBits(spiEventGroup, EVENT_TRIGGER_RECEIVED);
+        else if (dataValue == CTRL_LOCK_BUFFERS) {
+          Serial.println("WRITE CTRL: LOCK_BUFFERS");
+          
+          // Lock only if measurement is complete (status byte shows MEASURED)
+          if (txBuf[1] == STATUS_MEASURED) {
+            // Measurement done, fill txBuf starting at byte 2 with sensor data
+            xSemaphoreTake(currentDataMutex, portMAX_DELAY);
+            
+            currentData.sequence = sequenceNumber++;
+            currentData.status = STATUS_LOCKED;
+            
+            // Copy sensor packet to txBuf starting at byte 2
+            // (Byte 0=dummy, Byte 1=status, Bytes 2+=data)
+            memcpy(txBuf + 2, &currentData, sizeof(SensorDataPacket));
+            
+            xSemaphoreGive(currentDataMutex);
+            
+            // Transition to READY_TRANSFER
+            slaveState = STATE_READY_TRANSFER;
+            
+            // Update txBuf status (buffers locked, ready for read)
+            txBuf[1] = STATUS_LOCKED;
+            
+            Serial.println("[SPI] ✓ Sensor data prefilled at txBuf[2+], ready for read");
+          } else {
+            // Measurement not yet complete
+            Serial.printf("ERROR: LOCK called but measurement not ready (status=0x%02X)\n", txBuf[1]);
+          }
+        }
         
-        Serial.println("[SPI] ✓ Measurement task triggered (non-blocking)");
-      } else {
-        Serial.printf("ERROR: TRIGGER invalid in state %d (ignore)\n", slaveState);
+        else {
+          Serial.printf("ERROR: Unknown CTRL value 0x%02X\n", dataValue);
+        }
+        // Note: Don't clear txBuf, status byte [1] stays prefilled
       }
-    }
-    
-    else if (cmd == CMD_LOCK_BUFFERS) {
-      if (slaveState == STATE_READY_FOR_LOCK) {
-        Serial.println("LOCK");
-        
-        // Acquire mutex, prepare packet for transfer
-        xSemaphoreTake(currentDataMutex, portMAX_DELAY);
-        
-        currentData.sequence = sequenceNumber++;
-        currentData.status = statusByte;
-        
-        // Debug: Verify data exists BEFORE copy
-        Serial.printf("[Debug LOCK] currentData.rgbFrame[0-3]: %04X %04X %04X %04X\n",
-          currentData.rgbFrame[0], currentData.rgbFrame[1], currentData.rgbFrame[2], currentData.rgbFrame[3]);
-        
-        memcpy(txBuf + 1, &currentData, sizeof(SensorDataPacket));
-        
-        // Debug: Verify data exists in txBuf AFTER copy (at byte offset 8033 = 1 + 8032)
-        uint16_t *txRgbPtr = (uint16_t*)(&txBuf[8033]);
-        Serial.printf("[Debug LOCK] txBuf RGB[0-3]: %04X %04X %04X %04X\n",
-          txRgbPtr[0], txRgbPtr[1], txRgbPtr[2], txRgbPtr[3]);
-        
-        xSemaphoreGive(currentDataMutex);
-        
-        // Transition to READY_FOR_TRANSFER (data already prepared)
-        slaveState = STATE_READY_FOR_TRANSFER;
-        Serial.println("[Slave] ✓ Buffers locked and ready for transfer");
-      } else {
-        Serial.printf("ERROR: LOCK invalid in state %d (ignore)\n", slaveState);
+      
+      else if (address == ADDR_IR_LED) {
+        // ===== IR LED CONTROL (0x00=off, 0x01=on) =====
+        Serial.printf("WRITE IR_LED: %s\n", dataValue ? "ON" : "OFF");
+        IRLED(dataValue);
+        // Status at [1] stays prefilled
       }
-    }
-    
-    else if (cmd == CMD_TRANSFER_DATA) {
-      if (slaveState == STATE_READY_FOR_TRANSFER) {
-        Serial.println("TRANSFER");
-        // Data already in txBuf from LOCK phase
-        // Return to IDLE after master finishes reading
-        slaveState = STATE_IDLE;
-        Serial.println("[Slave] ✓ Transfer complete, returning to IDLE");
-      } else {
-        Serial.printf("ERROR: TRANSFER invalid in state %d (ignore)\n", slaveState);
+      
+      else if (address == ADDR_BRIGHTNESS) {
+        // ===== LED BRIGHTNESS (0-100) =====
+        Serial.printf("WRITE BRIGHTNESS: %d%%\n", dataValue);
+        powerLED(dataValue);
+        // Status at [1] stays prefilled
       }
-    }
-    
-    else if (cmd == CMD_NONE) {
-      // Poll - just respond with current status
-      if (slaveState == STATE_MEASURING) {
-        Serial.println("POLL (still measuring)");
-      } else if (slaveState == STATE_READY_FOR_LOCK) {
-        Serial.println("POLL (ready for lock)");
-      } else if (slaveState == STATE_READY_FOR_TRANSFER) {
-        Serial.println("POLL (ready for transfer)");
-      } else {
-        Serial.println("POLL");
+      
+      else {
+        Serial.printf("ERROR: WRITE unknown address 0x%02X\n", address);
       }
+    } else {
+      Serial.println("READ (no-op)");
     }
-    
-    // ========== LED CONTROL COMMANDS (Independent, always available) ==========
-    
-    else if (cmd == CMD_LED_BRIGHTNESS) {
-      uint8_t brightness = rxBuf[1];  // Value in byte 1
-      Serial.printf("LED_BRIGHTNESS: %d%%\n", brightness);
-      powerLED(brightness);
-    }
-    
-    else if (cmd == CMD_IR_LED) {
-      uint8_t irState = rxBuf[1];  // Value in byte 1 (0=off, 1=on)
-      Serial.printf("IR_LED: %s (value=%d, pin=%d)\n", irState ? "ON" : "OFF", irState, ledCntrlIR);
-      Serial.printf("GPIO19 state BEFORE: %d\n", digitalRead(ledCntrlIR));
-      IRLED(irState);
-      Serial.printf("GPIO19 state AFTER: %d\n", digitalRead(ledCntrlIR));
-    }
-    
-    else if (cmd == CMD_READ_AMB_LIGHT) {
-      // Ambient light is already in txBuf from current measurement
-      // Just log it
-      Serial.printf("AMB_LIGHT_READ: %d\n", currentData.ambientLight);
-    }
-    
-    else {
-      Serial.printf("UNKNOWN\n");
-    }
-    
-  } else if (ret == ESP_ERR_TIMEOUT) {
-    // Timeout is normal when master isn't active
-  } else {
-    Serial.printf("[Slave] SPI Error: %s\n", esp_err_to_name(ret));
-  }
 }
 
 // ============ Exposed Functions ============

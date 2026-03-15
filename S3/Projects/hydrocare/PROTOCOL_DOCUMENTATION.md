@@ -7,21 +7,22 @@ Complete redesign of SPI communication between Master (hydrocare_fw) and Slave (
 
 ## Architecture Summary
 
-### SLAVE (hydrocare_sensor) - Event-Driven Collection
+### SLAVE (hydrocare_sensor) - Event-Driven Collection with Prefilled TX
 - **2 FreeRTOS Tasks on separate cores:**
   - SPI Task (Core 1): Continuously blocks on SPI waiting for master commands
   - Measurement Task (Core 0): Event-driven, collects data when triggered
-- **3-Level Buffering:** Live → Staging → Ready (prevents corruption)
-- **State Machine:** IDLE → MEASURING → READY → TRANSFERRING → IDLE
-- **SPI Buffer Size:** 256 bytes (was 3 bytes)
+- **TX Buffer Prefilling:** After LOCK_BUFFERS command, txBuf is populated with sensor data
+- **State Machine:** IDLE → MEASURING → MEASURED → (LOCK) → READY_TRANSFER → IDLE
+- **SPI Buffer Size:** 20KB (handles ~16.6KB sensor packet + overhead)
 
-### MASTER (hydrocare_fw) - Synchronized Polling
+### MASTER (hydrocare_fw) - Synchronized 3-Step Protocol
 - **3-Step Measurement Cycle:**
-  1. `triggerMeasurementCycle()` - Send TRIGGER_MEASUREMENT (0x01)
-  2. `waitForSlaveReady()` - Poll until slave reports READY (0x02 status)
-  3. `readSensorDataBurst()` - Burst-read all sensor data in 256-byte chunks
-- **Data Struct:** SlaveData containing IMU, ambient light, IR frame, RGB camera frame
-- **Integration:** Called from loop() whenever `timerStream == 1`
+  1. `Send TRIGGER_MEASUREMENT (0x01)` - Start background collection
+  2. `Poll STATUS until MEASURED` - Wait for measurement complete
+  3. `Send LOCK_BUFFERS (0x02)` - Freeze buffers, prefill slave TX with data
+  4. `Read SENSOR_DATA (bulk 20KB)` - Grab preloaded sensor packet
+- **Data Struct:** SensorDataPacket (~16.6KB) containing accel time-series, IR frame, RGB frame, metadata
+- **Integration:** Called from loop() whenever sensor data needed
 
 ---
 
@@ -29,8 +30,8 @@ Complete redesign of SPI communication between Master (hydrocare_fw) and Slave (
 
 | Command | Code | Direction | Purpose |
 |---------|------|-----------|---------|
-| TRIGGER_MEASUREMENT | 0x01 | Master→Slave | Start data collection |
-| LOCK_BUFFERS | 0x02 | Master→Slave | Freeze buffers for reading |
+| TRIGGER_MEASUREMENT | 0x01 | Master→Slave | Start background data collection task |
+| LOCK_BUFFERS | 0x02 | Master→Slave | Freeze buffers, prefill TX with sensor data |
 | LED_CONTROL | 0x10 | Master→Slave | Legacy LED brightness |
 | IR_CONTROL | 0x11 | Master→Slave | Legacy IR LED control |
 | ACK | 0xAA | Slave→Master | Acknowledge |
@@ -42,8 +43,9 @@ Complete redesign of SPI communication between Master (hydrocare_fw) and Slave (
 
 ```
 Bit 0: MEASURING (0x01) - Slave actively collecting data
-Bit 1: READY    (0x02) - Data ready for transfer
-Bit 2: TRANSFERRING (0x04) - Transfer in progress
+Bit 1: MEASURED (0x02) - Data collection complete (awaiting LOCK)
+Bit 3: LOCKED (0x04) - Buffers locked, TX prefilled with sensor data
+Bit 4: READY_TRANSFER (0x08) - Ready for bulk read
 ```
 
 ---
@@ -61,29 +63,37 @@ Bit 3: DATA_VALID_RGB    (0x08) - RGB camera frame valid
 
 ## Timing
 
-### Typical Measurement Cycle:
+### Typical Measurement Cycle with Prefilled TX:
 ```
-T=0ms:      Master: triggerMeasurementCycle()
-            Slave: IDLE → MEASURING
+T=0ms:      Master: Send TRIGGER_MEASUREMENT (0x01)
+            Slave: STATE_IDLE → STATE_MEASURING
+            Background task starts collecting data
 
-T=0-1000ms: Slave: Collect all sensors
+T=0-1000ms: Slave: Collect all sensors (1 second of data)
             - Ambient light: ~1ms
-            - IMU: ~5ms
+            - Accel+Mic samples: 1000 @ 1kHz = 1 second
             - IR thermal: ~300ms
             - RGB camera: ~100ms
             
-T=1000ms:   Slave: Data commit
-            MEASURING → READY (buffers locked)
+T=1000ms:   Slave: Measurement complete
+            Status: MEASURING | MEASURED
 
-T=1050ms:   Master: waitForSlaveReady() detects READY
+T=1010ms:   Master: Poll STATUS, sees MEASURED bit set
             
-T=1060ms:   Master: readSensorDataBurst()
-            - Chunk 1 (256 bytes)
-            - Chunk 2 (256 bytes)
-            - Etc. until complete
+T=1020ms:   Master: Send LOCK_BUFFERS (0x02)
+            Slave: Acquires mutex, copies full SensorDataPacket to txBuf
+            Status: MEASURED | LOCKED | READY_TRANSFER
+            (txBuf is now prefilled with 20KB sensor data)
 
-T=1200ms:   Complete, return to IDLE
+T=1030ms:   Master: Read SENSOR_DATA (bulk 20KB read)
+            Slave: Transmits prefilled txBuf (no copy needed)
+            Status: LOCKED
+            After transfer complete: STATE_IDLE
+
+T=1200ms:   Complete, ready for next cycle
 ```
+
+**Key Advantage:** TX buffer is prefilled after LOCK command, so bulk read is immediate without additional copying overhead.
 
 ---
 
@@ -126,31 +136,39 @@ typedef struct {
 ## Usage Example (Master)
 
 ```cpp
-// In main loop when time to collect:
+// In main loop when ready to collect sensor data:
 if (timerStream == 1 && deviceConnected) {
     
-    // Step 1: Tell slave to collect
-    triggerMeasurementCycle();
+    // STEP 1: Trigger measurement on slave
+    uint8_t cmd = 0x01;  // ADDR_CTRL (write) | CTRL_TRIGGER_MEASUREMENT
+    masterSPI.writeByte(ADDR_CTRL, CTRL_TRIGGER_MEASUREMENT);
+    Serial.println("[Master] Triggered measurement");
     
-    // Step 2: Wait for slave to finish (up to 2 seconds)
-    if (waitForSlaveReady(2000)) {
-        
-        // Step 3: Read all data
-        SlaveData sensorData = {};
-        if (readSensorDataBurst(&sensorData)) {
-            
-            // Use the data
-            float tem_x = sensorData.ax;
-            uint16_t light = sensorData.ambLight;
-            // ... process frames ...
-            
-            // Log with master's own sensors
-            String dataRow = String(millis()) + "," + 
-                           String(light) + "," + 
-                           String(tem_x) + " ...";
-            logData(dataRow);
+    // STEP 2: Poll until measurement complete
+    uint32_t timeout = millis() + 2000;
+    uint8_t status = 0;
+    while (millis() < timeout) {
+        status = masterSPI.readByte(ADDR_STATUS);
+        if (status & 0x02) {  // MEASURED bit set?
+            Serial.println("[Master] Measurement complete!");
+            break;
         }
+        delay(10);
     }
+    
+    // STEP 3: Lock buffers and prefill slave TX
+    masterSPI.writeByte(ADDR_CTRL, CTRL_LOCK_BUFFERS);
+    Serial.println("[Master] Buffers locked, TX prefilled");
+    
+    // STEP 4: Read sensor data (already in slave's TX buffer)
+    SensorDataPacket sensorData = {};
+    masterSPI.readBulk(ADDR_SENSOR_DATA, &sensorData, sizeof(SensorDataPacket));
+    
+    // Now use the data
+    float accelX_avg = (float)(sensorData.accelX_samples[0]) / 1000.0;
+    uint16_t light = sensorData.ambientLight;
+    float temp = sensorData.temperature;
+    Serial.printf("[Master] Light=%d Temp=%.1f°C\n", light, temp);
 }
 ```
 
