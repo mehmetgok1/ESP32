@@ -13,6 +13,11 @@
 #define CMD_ACK 0xAA
 #define CMD_ERROR 0xFF
 
+// LED control commands (can run anytime, independent of measurement state)
+#define CMD_LED_BRIGHTNESS 0xF0    // Set power LED brightness (0-100%)
+#define CMD_IR_LED 0xF1            // Control IR LED (0=off, 1=on)
+#define CMD_READ_AMB_LIGHT 0xF2    // Read ambient light value
+
 // Slave status bits
 #define STATUS_MEASURING 0x01
 #define STATUS_MEASURED 0x02
@@ -202,10 +207,46 @@ void readSlaveData() {
 
 // Stub functions for compatibility with BLE module
 void sendIRLED(bool state) {
-  (void)state;  // Unused in test mode
+  uint8_t cmd = CMD_IR_LED;
+  memset(spiTxBuffer, 0, 10);
+  spiTxBuffer[0] = cmd;
+  spiTxBuffer[1] = state ? 0x01 : 0x00;  // 1=on, 0=off
+  
+  spi.beginTransaction(SPISettings(SPI_CLOCK_HZ, MSBFIRST, SPI_MODE0));
+  digitalWrite(SPI_CS, LOW);
+  delayMicroseconds(50);
+  
+  // Send command and LED state
+  for (int i = 0; i < 10; i++) {
+    spi.transfer(spiTxBuffer[i]);
+  }
+  
+  delayMicroseconds(20);
+  digitalWrite(SPI_CS, HIGH);
+  spi.endTransaction();
+  
+  Serial.printf("[Master] IR LED: %s\n", state ? "ON" : "OFF");
 }
 
 void sendBrightness(uint8_t brightness) {
-  (void)brightness;  // Unused in test mode
+  uint8_t cmd = CMD_LED_BRIGHTNESS;
+  memset(spiTxBuffer, 0, 10);
+  spiTxBuffer[0] = cmd;
+  spiTxBuffer[1] = brightness;  // 0-100
+  
+  spi.beginTransaction(SPISettings(SPI_CLOCK_HZ, MSBFIRST, SPI_MODE0));
+  digitalWrite(SPI_CS, LOW);
+  delayMicroseconds(50);
+  
+  // Send command and brightness value
+  for (int i = 0; i < 10; i++) {
+    spi.transfer(spiTxBuffer[i]);
+  }
+  
+  delayMicroseconds(20);
+  digitalWrite(SPI_CS, HIGH);
+  spi.endTransaction();
+  
+  Serial.printf("[Master] LED Brightness: %u%%\n", brightness);
 }
 

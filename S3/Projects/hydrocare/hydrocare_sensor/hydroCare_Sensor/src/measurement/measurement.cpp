@@ -24,6 +24,7 @@ SPISettings lisSettings(1000000, MSBFIRST, SPI_MODE3);
 // LIS3DH uses SPI Mode 3 (CPOL=1, CPHA=1)
 
 uint16_t ambLight = 0;
+uint16_t microphone = 0;  // Microphone ADC reading
 float ax = 0, ay = 0, az = 0;
 
 // MLX90641 refresh rates (Control register 0x800D bits 10:7):
@@ -122,6 +123,15 @@ void measureAmbLight()
   // Debug output to verify sensor is working
   Serial.printf("[AmbLight] RAW=%d V=%.3fV I=%.2fuA LUX=%u\n", raw, voltage, current_uA, ambLight);
 }
+
+void measureMicrophone()
+{
+  // Read microphone ADC value (fast, <100µs)
+  uint16_t raw = analogRead(IA_Out);
+  float voltage = (raw / 4095.0) * VREF;
+  microphone = (uint16_t)(voltage * 1000);  // Store in millivolts or raw ADC (adjust scale as needed)
+}
+
 void measureCamera()
 {
 

@@ -1,6 +1,7 @@
 #include "communication/communication.h"
 #include "config/config.h"
 #include "measurement/measurement.h"
+#include "leds/leds.h"
 #include "driver/spi_slave.h"
 #include "esp_camera.h"
 #include "MLX90641.h"
@@ -15,6 +16,11 @@
 #define CMD_TRIGGER_MEASUREMENT 0x01
 #define CMD_LOCK_BUFFERS 0x02
 #define CMD_TRANSFER_DATA 0x03
+
+// LED control commands (can run anytime, independent of measurement state)
+#define CMD_LED_BRIGHTNESS 0xF0    // Set power LED brightness (0-100%)
+#define CMD_IR_LED 0xF1            // Control IR LED (0=off, 1=on)
+#define CMD_READ_AMB_LIGHT 0xF2    // Read ambient light value
 
 // Slave status bits
 #define STATUS_MEASURING 0x01
@@ -342,6 +348,28 @@ void receiveCommand() {
       } else {
         Serial.println("POLL");
       }
+    }
+    
+    // ========== LED CONTROL COMMANDS (Independent, always available) ==========
+    
+    else if (cmd == CMD_LED_BRIGHTNESS) {
+      uint8_t brightness = rxBuf[1];  // Value in byte 1
+      Serial.printf("LED_BRIGHTNESS: %d%%\n", brightness);
+      powerLED(brightness);
+    }
+    
+    else if (cmd == CMD_IR_LED) {
+      uint8_t irState = rxBuf[1];  // Value in byte 1 (0=off, 1=on)
+      Serial.printf("IR_LED: %s (value=%d, pin=%d)\n", irState ? "ON" : "OFF", irState, ledCntrlIR);
+      Serial.printf("GPIO19 state BEFORE: %d\n", digitalRead(ledCntrlIR));
+      IRLED(irState);
+      Serial.printf("GPIO19 state AFTER: %d\n", digitalRead(ledCntrlIR));
+    }
+    
+    else if (cmd == CMD_READ_AMB_LIGHT) {
+      // Ambient light is already in txBuf from current measurement
+      // Just log it
+      Serial.printf("AMB_LIGHT_READ: %d\n", currentData.ambientLight);
     }
     
     else {
