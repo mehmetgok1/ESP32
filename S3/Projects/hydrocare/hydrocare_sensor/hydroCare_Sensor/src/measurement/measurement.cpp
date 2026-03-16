@@ -294,6 +294,23 @@ void initIMU()
 
   // ±2g, High resolution
   writeRegister(CTRL_REG4, 0x08);
+
+    // 100 Hz, all axes enabled
+  who = readRegister(CTRL_REG1);
+  Serial.print("WHO_AM_I: 0x");
+  Serial.println(who, HEX); // Should print 0x33
+  who = readRegister(CTRL_REG4);
+  Serial.print("WHO_AM_I: 0x");
+  Serial.println(who, HEX); // Should print 0x33
+  
+  // Give sensor time to stabilize after configuration
+  delay(150);  // LIS3DH needs time to start outputting valid data
+  
+  // Test initial read to verify sensor is outputting data
+  readAcceleration();
+  Serial.printf("Initial accel - X:%.3f Y:%.3f Z:%.3f\n", ax, ay, az);
+  
+  // Keep SPI open for continuous sensor operation
 }
 void initCamera()
 {
