@@ -9,6 +9,10 @@
 extern uint16_t ambLight;
 extern uint16_t microphone;  // Microphone ADC reading
 extern float ax,ay,az;
+extern float bme_temp;
+extern float bme_hum;
+extern float bme_pres;
+extern float bme_gas;
 extern MLX90641 myIRcam;
 
 // Measurement functions (called on-demand)
@@ -17,11 +21,13 @@ void measureMicrophone();     // Read microphone ADC
 void measureIRTemp();
 void readAcceleration();
 void measureCamera();
+void measureBME688();
 
 // Initialization
 void initCamera();
 void initIMU();
 void initIRTemp();
+void initBME688();
 
 // I2C/SPI primitives for sensors
 void writeRegister(uint8_t reg, uint8_t value);

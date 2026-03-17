@@ -11,6 +11,7 @@ void setup() {
   powerLEDInit();
   initIMU();
   initIRTemp();
+  initBME688(); // Ensure this is after initIMU so the SPI bus is ready
   initSPIComm();
   
   // Start background tasks
@@ -23,5 +24,3 @@ void setup() {
 void loop() {
   receiveCommand();
 }
-
-

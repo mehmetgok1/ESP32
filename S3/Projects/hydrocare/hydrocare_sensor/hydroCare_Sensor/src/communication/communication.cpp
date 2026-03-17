@@ -187,9 +187,14 @@ void collectMeasurementData() {
   }
   avgTemp /= 192;
   currentData.temperature = avgTemp;
-  currentData.humidity = 0.0f;  // TODO: add humidity sensor
   Serial.printf("[Debug] ✓ IR processed: avg temp = %.1f°C\n", avgTemp);
   
+  // 3.5 BME688 Environment Data
+  Serial.println("[Debug] Step 3.5: Measuring BME688...");
+  measureBME688();
+  currentData.humidity = bme_hum; // populate humidity from BME688
+  // Note: currentData.temperature currently uses the thermal average, you could replace it with `bme_temp` instead.
+
   // 4. RGB camera frame (slow, ~100ms)
   Serial.println("[Debug] Step 4: Capturing RGB frame...");
   

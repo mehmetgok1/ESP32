@@ -4,6 +4,11 @@
 #include "MLX90641.h"
 #include "esp_task_wdt.h"
 
+// Prevent 'sensor_t' redefinition conflict between esp_camera.h and Adafruit_Sensor.h
+#define sensor_t adafruit_sensor_t
+#include <Adafruit_BME680.h>
+#undef sensor_t
+
 #define CROP_SIZE 64
 #define PIXEL_BYTES (CROP_SIZE * CROP_SIZE * 2) // 8192 bytes
 #define R_LOAD 10000.0
@@ -26,6 +31,13 @@ SPISettings lisSettings(1000000, MSBFIRST, SPI_MODE3);
 uint16_t ambLight = 0;
 uint16_t microphone = 0;  // Microphone ADC reading
 float ax = 0, ay = 0, az = 0;
+
+// ===== BME688 Variables =====
+Adafruit_BME680 bme(AQ_CS, &spi); // Hardware SPI using AQ_CS
+float bme_temp = 0;
+float bme_hum = 0;
+float bme_pres = 0;
+float bme_gas = 0;
 
 // MLX90641 refresh rates (Control register 0x800D bits 10:7):
 // -----------------------------------------------------------
@@ -205,6 +217,20 @@ void measureIRTemp()
   // Only print summary (quick, non-blocking)
   Serial.printf("[Measurement] IR Thermal: Avg=%.1f°C, Ta=%.1f°C\n", avg, myIRcam.Ta);
 }
+
+void measureBME688()
+{
+  if (!bme.performReading()) {
+    Serial.println("[BME688] Failed to perform reading!");
+    return;
+  }
+  bme_temp = bme.temperature;
+  bme_hum = bme.humidity;
+  bme_pres = bme.pressure / 100.0; // convert to hPa
+  bme_gas = bme.gas_resistance / 1000.0; // convert to KOhms
+  Serial.printf("[BME688] Temp: %.2f °C, Hum: %.2f %%, Pres: %.2f hPa, Gas: %.2f KOhms\n", bme_temp, bme_hum, bme_pres, bme_gas);
+}
+
 void initIRTemp()
 {
 
@@ -315,6 +341,22 @@ void initIMU()
 
   // Keep SPI open for continuous sensor operation
 }
+
+void initBME688()
+{
+  if (!bme.begin()) {
+    Serial.println("[BME688] Could not find a valid BME688 sensor, check wiring!");
+  } else {
+    // Set up oversampling and filter initialization
+    bme.setTemperatureOversampling(BME680_OS_8X);
+    bme.setHumidityOversampling(BME680_OS_2X);
+    bme.setPressureOversampling(BME680_OS_4X);
+    bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
+    bme.setGasHeater(320, 150); // 320*C for 150 ms
+    Serial.println("[BME688] Initialized successfully");
+  }
+}
+
 void initCamera()
 {
 
