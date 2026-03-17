@@ -12,7 +12,7 @@
 #undef EEPROM_WORDS  // Remove library's definition
 #define EEPROM_WORDS 432 // MLX90641 EEPROM size (0x2400-0x272F)
 
-SPIClass spi = SPIClass(FSPI); // Use FSPI on ESP32-S3
+SPIClass spi = SPIClass(HSPI); // Use FSPI on ESP32-S3
 // ===== LIS3DH Registers =====
 #define WHO_AM_I 0x0F
 #define CTRL_REG1 0x20
@@ -79,12 +79,14 @@ void readMultiple(uint8_t startReg, uint8_t *buffer, uint8_t len)
 {
   spi.beginTransaction(lisSettings);
   digitalWrite(Acc_CS, LOW);
+  delayMicroseconds(50);
 
   spi.transfer(0xC0 | startReg); // Read + Auto increment (bit7=1, bit6=1)
 
   for (int i = 0; i < len; i++)
     buffer[i] = spi.transfer(0x00);
 
+  delayMicroseconds(50);
   digitalWrite(Acc_CS, HIGH);
   spi.endTransaction();
 }
@@ -309,7 +311,8 @@ void initIMU()
   // Test initial read to verify sensor is outputting data
   readAcceleration();
   Serial.printf("Initial accel - X:%.3f Y:%.3f Z:%.3f\n", ax, ay, az);
-  
+  spi.endTransaction();
+
   // Keep SPI open for continuous sensor operation
 }
 void initCamera()
