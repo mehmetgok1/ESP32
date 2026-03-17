@@ -221,6 +221,10 @@ void processBLETasks() {
     if (sendRgbFlag) {
         sendRgbFlag = false;
         
+        // Force a fresh SPI pull from the slave camera before sending
+        Serial.println("[BLE] Fetching fresh camera frame from slave...");
+        readSlaveData();
+        
         uint16_t* frame = getLastRGBFrame();
         if (!frame || !deviceConnected || pRgbChar == nullptr) return;
         

@@ -18,3 +18,4 @@ extern bool deviceConnected;
 // --- Function Declarations ---
 void initBLE();
 void notifyAll();
+void processBLETasks();
