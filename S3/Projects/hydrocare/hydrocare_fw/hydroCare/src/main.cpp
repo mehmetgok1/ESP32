@@ -34,6 +34,9 @@ void loop() {
     performOTAUpdate();
   }
   
+  // Process any pending BLE operations (like sending RGB frame)
+  processBLETasks();
+  
   if (deviceConnected && timerStream == 1 && deviceStatus == 1) {
     static uint32_t lastSlaveRead = 0;
     
@@ -69,4 +72,3 @@ void loop() {
     timerStream = 0;
   }
 }
-

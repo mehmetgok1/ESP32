@@ -199,7 +199,7 @@ void collectMeasurementData() {
   Serial.println("[Debug] Step 4: Capturing RGB frame...");
   
   // DEBUG MODE: Fill with 0xAAAA pattern
-  if (1) {
+  if (0) {
     for (int i = 0; i < 4096; i++) {
       currentData.rgbFrame[i] = 0xAAAA;
     }

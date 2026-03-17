@@ -346,3 +346,11 @@ void sendBrightness(uint8_t brightness) {
   spiWrite(ADDR_BRIGHTNESS, brightness);
 }
 
+// Expose the RGB frame for BLE transmission
+uint16_t* getLastRGBFrame() {
+  if (spiRxBuffer) {
+    SensorDataPacket *packet = (SensorDataPacket*)(spiRxBuffer);
+    return packet->rgbFrame;
+  }
+  return nullptr;
+}

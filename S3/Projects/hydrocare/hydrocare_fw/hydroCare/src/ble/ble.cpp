@@ -11,9 +11,13 @@
 
 // --- Globals ---
 bool deviceConnected = false;
+bool sendRgbFlag = false;
 
 // Characteristic Pointers
 NimBLECharacteristic *pBatChar, *pLuxChar, *pPirChar, *pMmwaveChar, *pActionChar, *pVerChar, *pAmbIntChar;
+NimBLECharacteristic *pRgbChar;
+
+#define UUID_RGB "c2a969f6-16e9-4e08-99e7-5e6086f6a546" // Custom UUID for RGB Frame
 
 // --- Callbacks ---
 class ServerCallbacks : public NimBLEServerCallbacks {
@@ -111,6 +115,11 @@ class ActionCallbacks: public NimBLECharacteristicCallbacks {
                     }
                 }
             }
+            // --- RGB REQUEST PARSER ---
+            else if (command.startsWith("Com;RGB")) {
+                Serial.println("[BLE] Command RGB received. Queueing frame transmission...");
+                sendRgbFlag = true;
+            }
         }
     }
 };
@@ -151,6 +160,9 @@ void initBLE() {
 
     pActionChar = pService->createCharacteristic(UUID_ACTION, NIMBLE_PROPERTY::WRITE);
     pActionChar->setCallbacks(new ActionCallbacks());
+
+    // Create RGB Image characteristic
+    pRgbChar = pService->createCharacteristic(UUID_RGB, NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::READ);
 
     // Initial Values
     pBatChar->setValue("0.0");
@@ -202,4 +214,37 @@ void notifyAll() {
                     String((int)detectionDist);
 
     sendValue(pMmwaveChar, mmwave);
+}
+
+// Process pending BLE actions like sending RGB frames (call from main loop)
+void processBLETasks() {
+    if (sendRgbFlag) {
+        sendRgbFlag = false;
+        
+        uint16_t* frame = getLastRGBFrame();
+        if (!frame || !deviceConnected || pRgbChar == nullptr) return;
+        
+        Serial.println("[BLE] Sending 64x64 RGB Frame...");
+        uint8_t* ptr = (uint8_t*)frame;
+        int remaining = 8192; // 64x64 pixels * 2 bytes
+        int offset = 0;
+        
+        while (remaining > 0) {
+            int chunkSize = remaining > 200 ? 200 : remaining;
+            uint8_t payload[202]; // 2 bytes offset + up to 200 bytes data
+            
+            payload[0] = offset & 0xFF;         // Offset Lower Byte
+            payload[1] = (offset >> 8) & 0xFF;  // Offset Upper Byte
+            memcpy(&payload[2], ptr + offset, chunkSize);
+            
+            pRgbChar->setValue(payload, chunkSize + 2);
+            pRgbChar->notify();
+            
+            offset += chunkSize;
+            remaining -= chunkSize;
+            
+            delay(15); // Yield 15ms to allow BLE stack to push packets
+        }
+        Serial.println("[BLE] RGB Frame transmission complete!");
+    }
 }
