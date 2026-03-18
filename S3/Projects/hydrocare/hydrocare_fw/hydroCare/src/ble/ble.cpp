@@ -229,10 +229,6 @@ void notifyAll() {
 // Process pending BLE actions like sending RGB frames (call from main loop)
 void processBLETasks() {
     if (sendRgbFlag || sendIrFlag) {
-        // Force a fresh SPI pull from the slave camera before sending
-        Serial.println("[BLE] Fetching camera frame from slave...");
-        readSlaveData();
-        
         if (sendRgbFlag) {
             sendRgbFlag = false;
             uint16_t* frame = getLastRGBFrame();
@@ -255,7 +251,7 @@ void processBLETasks() {
                     
                     offset += chunkSize;
                     remaining -= chunkSize;
-                    delay(15); 
+                    delay(15);
                 }
                 Serial.println("[BLE] RGB Frame transmission complete!");
             }
@@ -276,6 +272,7 @@ void processBLETasks() {
                     memcpy(&payload[2], ptr + offset, chunkSize);
                     pIrChar->setValue(payload, chunkSize + 2);
                     pIrChar->notify();
+                    
                     offset += chunkSize;
                     remaining -= chunkSize;
                     delay(15);

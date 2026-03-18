@@ -8,7 +8,7 @@
 #include "ota/ota.h"
 #include "communication/communication.h"
 
-
+bool deviceStatus = false; // false = stopped, true = logging
 
 void setup() {
   initPins();
@@ -40,8 +40,7 @@ void loop() {
   processBLETasks();
   
   if (deviceConnected && timerStream == 1 && deviceStatus == 1) {
-    static uint32_t lastSlaveRead = 0;
-    
+
     String dataRow;
     
     // Measure all local sensors
@@ -50,11 +49,17 @@ void loop() {
     measurePIR();
     measuremmWave();
     
-    // Read sensor data from slave every 1 second
-    if (millis() - lastSlaveRead >= 1000) {
-      Serial.println("\n[Master] Requesting sensor data from slave...");
-      readSlaveData();
-      lastSlaveRead = millis();
+    uint32_t loopStartTime = millis();
+    
+    // Fetch fresh data and assign it to our pointer
+    SensorDataPacket* slaveData = readSlaveData(); 
+    
+    uint32_t loopDuration = millis() - loopStartTime;
+    Serial.printf("\n[Master] SLAVE sensor READ completed in %u ms\n", loopDuration);
+    
+    // Update internal ambient light from slave data
+    if (slaveData != nullptr) {
+      ambLight_Int = slaveData->ambientLight;
     }
     
     // Build data row with local and slave measurements
@@ -66,11 +71,14 @@ void loop() {
               String(movingEnergy) + "," +
               String(staticDist) + "," +
               String(staticEnergy) + "," +
-              String(detectionDist);
+              String(detectionDist) + "," +
+              String(ambLight_Int);
     
     logData(dataRow);
     notifyAll();
     
     timerStream = 0;
+
+    
   }
 }

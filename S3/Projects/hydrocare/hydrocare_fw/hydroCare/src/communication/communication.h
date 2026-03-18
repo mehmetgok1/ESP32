@@ -77,7 +77,7 @@ void initSPIComm();
 uint8_t spiRead(uint8_t address);
 void spiWrite(uint8_t address, uint8_t data);
 void spiReadBulk(uint8_t address, uint8_t *buffer, uint16_t numBytes);
-void readSlaveData();
+SensorDataPacket* readSlaveData();
 void sendIRLED(bool state);
 void sendBrightness(uint8_t brightness);
 uint16_t* getLastRGBFrame();

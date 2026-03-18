@@ -188,7 +188,7 @@ void spiReadBulk(uint8_t address, uint8_t *buffer, uint16_t numBytes) {
 // 4. Poll STATUS for lock complete
 // 5. Bulk read sensor data
 // Called from main.cpp every 1 second
-void readSlaveData() {
+SensorDataPacket* readSlaveData() {
   Serial.println("[Master] === Starting sensor data acquisition ===");
   
   // ========== STEP 1: Set Trigger ==========
@@ -210,12 +210,12 @@ void readSlaveData() {
       break;
     }
     Serial.printf("  Polling... status: 0x%02X\n", status);
-    delay(100);
+    delay(50);
   }
   
   if (!measured) {
     Serial.println("[Master] ERROR: Timeout waiting for STATUS_MEASURED");
-    return;
+    return nullptr;
   }
   
   // ========== STEP 3: Set Lock ==========
@@ -236,12 +236,12 @@ void readSlaveData() {
       break;
     }
     Serial.printf("  Polling... status: 0x%02X\n", status);
-    delay(100);
+    delay(50);
   }
   
   if (!locked) {
     Serial.println("[Master] ERROR: Timeout waiting for STATUS_LOCKED");
-    return;
+    return nullptr;
   }
   
   // ========== STEP 5: Bulk Read Sensor Data ==========
@@ -258,11 +258,11 @@ void readSlaveData() {
   Serial.printf("[Master] Received %u bytes of sensor data\n", SPI_BUFFER_SIZE);
   
   // Debug header - these are sensor data bytes, not protocol overhead
-  Serial.printf("[Debug] Raw buffer [0-15]: ");
+  /*Serial.printf("[Debug] Raw buffer [0-15]: ");
   for (int i = 0; i < 16; i++) {
     Serial.printf("%02X ", spiRxBuffer[i]);
   }
-  Serial.println();
+  Serial.println();*/
   
   // Cast packet directly (data starts at byte 0 - pure sensor packet)
   SensorDataPacket *packet = (SensorDataPacket*)(spiRxBuffer);
@@ -275,7 +275,7 @@ void readSlaveData() {
     packet->accelSampleCount, packet->accelX, packet->accelY, packet->accelZ);
   
   // Calculate statistics for accel samples
-  if (packet->accelSampleCount > 0) {
+  /*if (packet->accelSampleCount > 0) {
     int32_t sumX = 0, sumY = 0, sumZ = 0;
     int16_t minX = 32767, maxX = -32768;
     int16_t minY = 32767, maxY = -32768;
@@ -301,10 +301,10 @@ void readSlaveData() {
     Serial.printf("[1kHz Accel Stats] X: avg=%+.1f min=%+d max=%+d\n", avgX, minX, maxX);
     Serial.printf("[1kHz Accel Stats] Y: avg=%+.1f min=%+d max=%+d\n", avgY, minY, maxY);
     Serial.printf("[1kHz Accel Stats] Z: avg=%+.1f min=%+d max=%+d\n", avgZ, minZ, maxZ);
-  }
+  }*/
   
   // Microphone statistics
-  uint16_t micMin = 65535, micMax = 0;
+  /*uint16_t micMin = 65535, micMax = 0;
   uint32_t micSum = 0;
   for (int i = 0; i < 1000; i++) {
     if (packet->microphoneSamples[i] < micMin) micMin = packet->microphoneSamples[i];
@@ -331,7 +331,9 @@ void readSlaveData() {
   }
   
   Serial.printf("[Frames] RGB: [%u - %u] | IR: [%u - %u]\n", rgbMin, rgbMax, irMin, irMax);
-  Serial.println("[Master] === Sensor data acquisition complete! ===\n");
+  Serial.println("[Master] === Sensor data acquisition complete! ===\n");*/
+  
+  return packet;
 }
 
 // LED control using protocol address writes

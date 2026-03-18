@@ -25,7 +25,6 @@ uint16_t ambLight_Int=0;
 bool chargingStatus = false, buttonStatus = false;
 uint16_t startTime = 0;
 
-bool deviceStatus = 0;
 
 void parseAndPrintFrame(const uint8_t* frame, uint16_t len) {
   if (len < 18)          return;
