@@ -81,5 +81,6 @@ void readSlaveData();
 void sendIRLED(bool state);
 void sendBrightness(uint8_t brightness);
 uint16_t* getLastRGBFrame();
+uint16_t* getLastIRFrame();
 
 #endif

@@ -354,3 +354,11 @@ uint16_t* getLastRGBFrame() {
   }
   return nullptr;
 }
+
+uint16_t* getLastIRFrame() {
+  if (spiRxBuffer) {
+    SensorDataPacket *packet = (SensorDataPacket*)(spiRxBuffer);
+    return packet->irFrame;
+  }
+  return nullptr;
+}
