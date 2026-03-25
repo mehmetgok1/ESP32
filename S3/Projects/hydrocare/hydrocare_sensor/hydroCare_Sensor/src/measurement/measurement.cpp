@@ -215,7 +215,7 @@ void measureIRTemp()
   avg /= (float)NUM_PIXELS;
   
   // Only print summary (quick, non-blocking)
-  Serial.printf("[Measurement] IR Thermal: Avg=%.1f°C, Ta=%.1f°C\n", avg, myIRcam.Ta);
+  //Serial.printf("[Measurement] IR Thermal: Avg=%.1f°C, Ta=%.1f°C\n", avg, myIRcam.Ta);
 }
 
 void measureBME688()
@@ -228,7 +228,7 @@ void measureBME688()
   bme_hum = bme.humidity;
   bme_pres = bme.pressure / 100.0; // convert to hPa
   bme_gas = bme.gas_resistance / 1000.0; // convert to KOhms
-  Serial.printf("[BME688] Temp: %.2f °C, Hum: %.2f %%, Pres: %.2f hPa, Gas: %.2f KOhms\n", bme_temp, bme_hum, bme_pres, bme_gas);
+  //Serial.printf("[BME688] Temp: %.2f °C, Hum: %.2f %%, Pres: %.2f hPa, Gas: %.2f KOhms\n", bme_temp, bme_hum, bme_pres, bme_gas);
 }
 
 void initIRTemp()
@@ -348,11 +348,12 @@ void initBME688()
     Serial.println("[BME688] Could not find a valid BME688 sensor, check wiring!");
   } else {
     // Set up oversampling and filter initialization
-    bme.setTemperatureOversampling(BME680_OS_8X);
-    bme.setHumidityOversampling(BME680_OS_2X);
-    bme.setPressureOversampling(BME680_OS_4X);
+    // Lower oversampling = faster readings. 1X is minimum (single sample, no averaging)
+    bme.setTemperatureOversampling(BME680_OS_1X);  // was 8X - 8x faster now
+    bme.setHumidityOversampling(BME680_OS_1X);     // was 2X - 2x faster now
+    bme.setPressureOversampling(BME680_OS_1X);     // was 4X - 4x faster now
     bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
-    bme.setGasHeater(320, 150); // 320*C for 150 ms
+    bme.setGasHeater(320, 50); // 320°C for 50ms (was 150ms - use lower time for speed)
     Serial.println("[BME688] Initialized successfully");
   }
 }

@@ -52,6 +52,33 @@ static TaskHandle_t measurementTaskHandle = NULL;
 // Event group bits
 #define EVENT_TRIGGER_RECEIVED (1 << 0)    // Trigger command received
 
+// ============ Cached Sensor Data (Double Buffering) ============
+// IR cache structure
+struct IRCache {
+  uint16_t irFrame[192];
+  float avgTemp;
+  float Ta;
+  uint32_t timestamp;
+};
+
+// BME cache structure
+struct BMECache {
+  float temp;
+  float humidity;
+  float pressure;
+  float gas;
+  uint32_t timestamp;
+};
+
+static IRCache irCache[2] = {0};          // Double buffer (avoid race conditions while reading)
+static BMECache bmeCache[2] = {0};        // Double buffer
+static volatile int irWriteIdx = 0;       // Background task writes to this index
+static volatile int bmeWriteIdx = 0;      // Background task writes to this index
+static SemaphoreHandle_t irCacheMutex = NULL;
+static SemaphoreHandle_t bmeCacheMutex = NULL;
+static TaskHandle_t irTaskHandle = NULL;
+static TaskHandle_t bmeTaskHandle = NULL;
+
 // ============ Initialization ============
 void initSPIComm() {
   // Allocate DMA buffers
@@ -95,8 +122,10 @@ void initSPIComm() {
   // Create FreeRTOS synchronization primitives
   spiEventGroup = xEventGroupCreate();
   currentDataMutex = xSemaphoreCreateMutex();
+  irCacheMutex = xSemaphoreCreateMutex();
+  bmeCacheMutex = xSemaphoreCreateMutex();
   
-  if (!spiEventGroup || !currentDataMutex) {
+  if (!spiEventGroup || !currentDataMutex || !irCacheMutex || !bmeCacheMutex) {
     Serial.println("[Slave] Mutex/EventGroup creation failed!");
     while(1) delay(1000);
   }
@@ -132,19 +161,22 @@ uint8_t getStatusByte() {
 // ============ Measurement Collection (runs in background task) ============
 void collectMeasurementData() {
   Serial.println("[Measurement] ★ COLLECTING DATA...");
-  uint32_t startTime = millis();
+  uint32_t totalStartTime = millis();
+  uint32_t stepTime = 0;
   
   // Acquire mutex before modifying currentData
   xSemaphoreTake(currentDataMutex, portMAX_DELAY);
   
   // 1. Ambient light (fast, ~1ms)
   Serial.println("[Debug] Step 1: Measuring ambient light...");
+  stepTime = millis();
   measureAmbLight();
   currentData.ambientLight = ambLight;
-  Serial.printf("[Debug] ✓ Ambient light: %d\n", ambLight);
+  Serial.printf("[Debug] ✓ Ambient light: %d | Time: %lu ms\n", ambLight, millis() - stepTime);
   
   // 2. Grab high-speed accel + mic samples from ring buffer (last 1000 @ 1kHz = 1 second of data)
   Serial.println("[Debug] Step 2: Snapshot 1000 accel+mic samples from ring buffer...");
+  stepTime = millis();
   
   // Calculate start index (1000 samples back from current write position)
   // Capture endIdx FIRST - even if sampler advances during copy, we use this snapshot
@@ -172,31 +204,37 @@ void collectMeasurementData() {
   currentData.gyroY = 0;
   currentData.gyroZ = 0;
   
-  Serial.printf("[Debug] ✓ Accel+Mic samples: Count=%d (full 1 second), Last=[X:%d Y:%d Z:%d Mic:%d]\n", 
-    1000, currentData.accelX, currentData.accelY, currentData.accelZ, microphone_ring[endIdx > 0 ? endIdx - 1 : RING_BUFFER_SIZE - 1]);
+  Serial.printf("[Debug] ✓ Accel+Mic samples: Count=%d (full 1 second), Last=[X:%d Y:%d Z:%d Mic:%d] | Time: %lu ms\n", 
+    1000, currentData.accelX, currentData.accelY, currentData.accelZ, microphone_ring[endIdx > 0 ? endIdx - 1 : RING_BUFFER_SIZE - 1], millis() - stepTime);
   
-  // 3. IR temperature frame (medium, ~300ms at 4Hz)
-  Serial.println("[Debug] Step 3: Measuring IR thermal...");
-  measureIRTemp();
-  Serial.println("[Debug] ✓ IR measurement done, processing data...");
+  // 3. IR temperature frame - GRAB FROM CACHE (background task updates every 200ms)
+  Serial.println("[Debug] Step 3: Grabbing cached IR thermal...");
+  stepTime = millis();
   
-  float avgTemp = 0;
+  xSemaphoreTake(irCacheMutex, portMAX_DELAY);
+  int irReadIdx = 1 - irWriteIdx;  // Read from buffer NOT being written to
   for (int i = 0; i < 192; i++) {
-    currentData.irFrame[i] = (uint16_t)((myIRcam.T_o[i] + 40) * 100);
-    avgTemp += myIRcam.T_o[i];
+    currentData.irFrame[i] = irCache[irReadIdx].irFrame[i];
   }
-  avgTemp /= 192;
-  currentData.temperature = avgTemp;
-  Serial.printf("[Debug] ✓ IR processed: avg temp = %.1f°C\n", avgTemp);
+  currentData.temperature = irCache[irReadIdx].avgTemp;
+  xSemaphoreGive(irCacheMutex);
   
-  // 3.5 BME688 Environment Data
-  Serial.println("[Debug] Step 3.5: Measuring BME688...");
-  measureBME688();
-  currentData.humidity = bme_hum; // populate humidity from BME688
-  // Note: currentData.temperature currently uses the thermal average, you could replace it with `bme_temp` instead.
+  Serial.printf("[Debug] ✓ IR cached: avg temp = %.1f°C | Time: %lu ms\n", currentData.temperature, millis() - stepTime);
+  
+  // 3.5 BME688 Environment Data - GRAB FROM CACHE (background task updates every 200ms)
+  Serial.println("[Debug] Step 3.5: Grabbing cached BME688...");
+  stepTime = millis();
+  
+  xSemaphoreTake(bmeCacheMutex, portMAX_DELAY);
+  int bmeReadIdx = 1 - bmeWriteIdx;  // Read from buffer NOT being written to
+  currentData.humidity = bmeCache[bmeReadIdx].humidity;
+  xSemaphoreGive(bmeCacheMutex);
+  
+  Serial.printf("[Debug] ✓ BME688 cached | Time: %lu ms\n", millis() - stepTime);
 
   // 4. RGB camera frame (slow, ~100ms)
   Serial.println("[Debug] Step 4: Capturing RGB frame...");
+  stepTime = millis();
   
   // DEBUG MODE: Fill with 0xAAAA pattern
   if (0) {
@@ -248,16 +286,18 @@ void collectMeasurementData() {
       Serial.println("[Debug] ✗ Camera buffer NULL!");
     }
   }
+  Serial.printf("[Debug] ✓ RGB frame complete | Time: %lu ms\n", millis() - stepTime);
   
   // 5. Timestamp
   Serial.println("[Debug] Step 5: Setting timestamp...");
+  stepTime = millis();
   currentData.timestamp_ms = millis();
-  Serial.printf("[Debug] ✓ Timestamp: %lu ms\n", currentData.timestamp_ms);
+  Serial.printf("[Debug] ✓ Timestamp: %lu ms | Time: %lu ms\n", currentData.timestamp_ms, millis() - stepTime);
   
   // Release mutex after all updates complete
   xSemaphoreGive(currentDataMutex);
   
-  uint32_t elapsed = millis() - startTime;
+  uint32_t elapsed = millis() - totalStartTime;
   Serial.printf("[Measurement] ✓ Complete in %lu ms\n", elapsed);
 }
 
@@ -289,6 +329,77 @@ static void measurementCollectorTask(void *pvParameters) {
     }
     
     taskYIELD();  // Let other tasks run
+  }
+}
+
+// ============ IR Sensor Background Task (Every 200ms) ============
+// Continuously reads IR sensor and caches result in double buffer
+static void irSensorBackgroundTask(void *pvParameters) {
+  TickType_t lastWakeTime = xTaskGetTickCount();
+  
+  while (1) {
+    // Precise 200ms timing
+    vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(200));
+    
+    // Read IR sensor (blocking ~134ms)
+    measureIRTemp();
+    
+    // Calculate average temperature
+    float avgTemp = 0;
+    for (int i = 0; i < 192; i++) {
+      avgTemp += myIRcam.T_o[i];
+    }
+    avgTemp /= 192;
+    
+    // Write to cache with mutex protection
+    xSemaphoreTake(irCacheMutex, portMAX_DELAY);
+    int writeIdx = irWriteIdx;
+    
+    // Convert temperatures to fixed-point format (+ 40 offset, *100 scale)
+    for (int i = 0; i < 192; i++) {
+      irCache[writeIdx].irFrame[i] = (uint16_t)((myIRcam.T_o[i] + 40) * 100);
+    }
+    irCache[writeIdx].avgTemp = avgTemp;
+    irCache[writeIdx].Ta = myIRcam.Ta;
+    irCache[writeIdx].timestamp = millis();
+    
+    // Swap write index for next iteration (double buffering)
+    irWriteIdx = 1 - irWriteIdx;
+    
+    xSemaphoreGive(irCacheMutex);
+    
+    taskYIELD();
+  }
+}
+
+// ============ BME Sensor Background Task (Every 200ms) ============
+// Continuously reads BME688 sensor and caches result in double buffer
+static void bmeSensorBackgroundTask(void *pvParameters) {
+  TickType_t lastWakeTime = xTaskGetTickCount();
+  
+  while (1) {
+    // Precise 200ms timing
+    vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(200));
+    
+    // Read BME sensor (blocking ~123ms with optimized settings)
+    measureBME688();
+    
+    // Write to cache with mutex protection
+    xSemaphoreTake(bmeCacheMutex, portMAX_DELAY);
+    int writeIdx = bmeWriteIdx;
+    
+    bmeCache[writeIdx].temp = bme_temp;
+    bmeCache[writeIdx].humidity = bme_hum;
+    bmeCache[writeIdx].pressure = bme_pres;
+    bmeCache[writeIdx].gas = bme_gas;
+    bmeCache[writeIdx].timestamp = millis();
+    
+    // Swap write index for next iteration (double buffering)
+    bmeWriteIdx = 1 - bmeWriteIdx;
+    
+    xSemaphoreGive(bmeCacheMutex);
+    
+    taskYIELD();
   }
 }
 
@@ -471,4 +582,33 @@ void startHighSpeedSamplerTask() {
     1               // Core 1 (dedicated to sampling, Core 0 free for SPI + measurement)
   );
   Serial.println("[Slave] High-speed sampler task created on Core 1 @ 1kHz");
+}
+
+// Start the IR sensor background task (continuous 200ms sampling with caching)
+void startIRSensorTask() {
+  xTaskCreatePinnedToCore(
+    irSensorBackgroundTask,
+    "IRSensorTask",
+    8192,           // Stack size (8 KB - sufficient for MLX90641 library)
+    NULL,           // Parameters
+    1,              // Priority (same as sampler, won't interfere with measurement)
+    &irTaskHandle,
+    1               // Core 1 (background caching task)
+  );
+  Serial.println("[Slave] IR sensor task created on Core 1 @ 200ms");
+}
+
+// Start the BME sensor background task (continuous 200ms sampling with caching)
+void startBMESensorTask() {
+  xTaskCreatePinnedToCore(
+    bmeSensorBackgroundTask,
+    "BMESensorTask",
+    8192,           // Stack size (8 KB - sufficient for BME688 library)
+    NULL,           // Parameters
+    1,              // Priority (same as sampler, won't interfere with measurement)
+    &bmeTaskHandle,
+    1               // Core 1 (background caching task)
+  );
+  Serial.println("[Slave] BME SENSOR task created on Core 1 @ 200ms");
+
 }

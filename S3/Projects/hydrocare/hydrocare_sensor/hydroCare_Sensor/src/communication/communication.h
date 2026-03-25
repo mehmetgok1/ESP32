@@ -64,6 +64,8 @@ void initSPIComm();
 void receiveCommand();
 void startMeasurementTask();          // Start background measurement collector task
 void startHighSpeedSamplerTask();     // Start 1kHz accel+mic sampler task
+void startIRSensorTask();             // Start background IR thermal sensor task (200ms)
+void startBMESensorTask();            // Start background BME688 sensor task (200ms)
 
 // Get slave status byte
 uint8_t getStatusByte();

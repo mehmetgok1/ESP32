@@ -15,10 +15,12 @@ void setup() {
   initSPIComm();
   
   // Start background tasks
-  startHighSpeedSamplerTask();  // 1kHz accel + mic sampling on Core 0 (Priority 3)
+  startHighSpeedSamplerTask();  // 1kHz accel + mic sampling on Core 1 (Priority 1)
+  startIRSensorTask();          // IR thermal sensor every 200ms on Core 1 (Priority 1)
+  startBMESensorTask();         // BME688 sensor every 200ms on Core 1 (Priority 1)
   startMeasurementTask();       // Measurement collector on Core 0 (Priority 2)
   
-  Serial.println("✓ Setup Complete - Ready for SPI with 1kHz sampler + concurrent measurements");
+  Serial.println("✓ Setup Complete - Ready for SPI with cached sensors (IR+BME@200ms, Accel@1kHz)");
 }
 
 void loop() {
