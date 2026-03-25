@@ -39,8 +39,6 @@
         button#btnStop { background: var(--btn-stop); }
         button#btnOTA { background: var(--btn-ota); }
         button#btnClear { background: #30363d; flex: 0.2; margin-top: 10px; }
-        button#btnRequestFrame { background: #1f6feb; }
-        button#btnRequestFrame:hover { background: #388bfd; }
         button:disabled { background: #444 !important; cursor: not-allowed; color: #8b949e; }
 
         .chart-container { width: 100%; max-width: 900px; background: var(--chart-bg); border: 1px solid #30363d; border-radius: 10px; padding: 15px; margin-bottom: 20px; box-sizing: border-box; }
@@ -104,15 +102,12 @@
 
     <!-- NEW CAMERA PANEL -->
     <div class="control-panel">
-        <div class="label" style="margin-bottom: 10px;">Camera Monitor</div>
-        <div class="btn-row" style="margin-bottom: 20px;">
-            <button id="btnRequestFrame" onclick="requestFrames()" disabled>Request Frame</button>
-        </div>
+        <div class="label" style="margin-bottom: 10px;">Camera Monitor (Auto-updating every 1 second)</div>
         
         <div style="display: flex; justify-content: center; gap: 40px; flex-wrap: wrap;">
             <div style="text-align: center;">
-                <div class="label">RGB Camera (64x64)</div>
-                <canvas id="rgbCanvas" class="camera-view" width="64" height="64" style="width: 256px; height: 256px;"></canvas>
+                <div class="label">RGB Camera (16x16 downsampled)</div>
+                <canvas id="rgbCanvas" class="camera-view" width="16" height="16" style="width: 256px; height: 256px;"></canvas>
             </div>
             <div style="text-align: center;">
                 <div class="label">IR Thermal (16x12)</div>
@@ -147,7 +142,7 @@
     let actionChar = null;
     
     // Global buffers for image data
-    let rgbBuffer = new Uint8Array(8192); // 64x64 * 2
+    let rgbBuffer = new Uint8Array(512); // 16x16 * 2 (downsampled from 64x64)
     let irBuffer = new Uint8Array(384);   // 16x12 * 2
 
     function toggleIR(cb) {
@@ -201,10 +196,6 @@
     }
     
     // ----- Camera Frame Handling -----
-    function requestFrames() {
-        sendCommand('Com;Frames');
-    }
-
     function handleRGBChunk(event) {
         const value = event.target.value;
         const offset = value.getUint16(0, true);
@@ -212,7 +203,7 @@
         for (let i = 0; i < chunkLength; i++) {
             rgbBuffer[offset + i] = value.getUint8(2 + i);
         }
-        if (offset + chunkLength >= 8192) drawRGBFrame();
+        if (offset + chunkLength >= 512) drawRGBFrame();  // 16x16 = 512 bytes
     }
     
     function handleIRChunk(event) {
@@ -228,13 +219,13 @@
     function drawRGBFrame() {
         const canvas = document.getElementById('rgbCanvas');
         const ctx = canvas.getContext('2d');
-        const imgData = ctx.createImageData(64, 64);
-        for (let i = 0; i < 4096; i++) {
+        const imgData = ctx.createImageData(16, 16);  // 16x16 downsampled
+        for (let i = 0; i < 256; i++) {  // 16*16 = 256 pixels
             const pixel = rgbBuffer[i * 2] | (rgbBuffer[i * 2 + 1] << 8);
-            imgData.data[i * 4]     = ((pixel >> 11) & 0x1F) * 255 / 31; 
-            imgData.data[i * 4 + 1] = ((pixel >> 5)  & 0x3F) * 255 / 63; 
-            imgData.data[i * 4 + 2] = (pixel         & 0x1F) * 255 / 31; 
-            imgData.data[i * 4 + 3] = 255;                               
+            imgData.data[i * 4]     = ((pixel >> 11) & 0x1F) * 255 / 31;  // R
+            imgData.data[i * 4 + 1] = ((pixel >> 5)  & 0x3F) * 255 / 63;  // G
+            imgData.data[i * 4 + 2] = (pixel         & 0x1F) * 255 / 31;  // B
+            imgData.data[i * 4 + 3] = 255;                                // A
         }
         ctx.putImageData(imgData, 0, 0);
     }
@@ -371,7 +362,6 @@
             } catch(e) { log("! IR stream unavailable"); }
 
             btn.innerText = 'Connected ✓';
-            document.getElementById('btnRequestFrame').disabled = false;
 
             device.addEventListener('gattserverdisconnected', () => {
                 log('Device Lost');
@@ -379,7 +369,6 @@
                 document.getElementById('fwVer').innerText = '--';
                 btn.disabled = false;
                 btn.innerText = 'Connect Device';
-                document.getElementById('btnRequestFrame').disabled = true;
             });
 
         } catch (err) {

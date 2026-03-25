@@ -364,3 +364,62 @@ uint16_t* getLastIRFrame() {
   }
   return nullptr;
 }
+
+// Downsample 64x64 RGB565 frame to 16x16 by averaging 4x4 pixel blocks
+// Input: rgbFrame64x64 (4096 pixels = 64x64)
+// Output: outFrame16x16 (256 pixels = 16x16)
+// Returns: pointer to downsampled frame
+uint16_t* downsampleRGBFrame(uint16_t* rgbFrame64x64, uint16_t* outFrame16x16) {
+  if (!rgbFrame64x64 || !outFrame16x16) {
+    return nullptr;
+  }
+  
+  int outIdx = 0;
+  
+  // Iterate through 16x16 output grid
+  for (int outY = 0; outY < 16; outY++) {
+    for (int outX = 0; outX < 16; outX++) {
+      // Each output pixel represents a 4x4 block from input
+      int inY_start = outY * 4;
+      int inX_start = outX * 4;
+      
+      uint32_t sumR = 0, sumG = 0, sumB = 0;
+      uint8_t count = 0;
+      
+      // Average 4x4 block
+      for (int dy = 0; dy < 4; dy++) {
+        for (int dx = 0; dx < 4; dx++) {
+          int inY = inY_start + dy;
+          int inX = inX_start + dx;
+          
+          if (inY < 64 && inX < 64) {
+            uint16_t pixel = rgbFrame64x64[inY * 64 + inX];
+            
+            // Extract RGB565: RRRRRGGGGGGBBBBB
+            uint8_t r = (pixel >> 11) & 0x1F;  // 5 bits
+            uint8_t g = (pixel >> 5) & 0x3F;   // 6 bits
+            uint8_t b = pixel & 0x1F;          // 5 bits
+            
+            sumR += r;
+            sumG += g;
+            sumB += b;
+            count++;
+          }
+        }
+      }
+      
+      // Average and recombine
+      if (count > 0) {
+        uint8_t avgR = sumR / count;
+        uint8_t avgG = sumG / count;
+        uint8_t avgB = sumB / count;
+        
+        // Recombine to RGB565
+        uint16_t averaged = ((avgR & 0x1F) << 11) | ((avgG & 0x3F) << 5) | (avgB & 0x1F);
+        outFrame16x16[outIdx++] = averaged;
+      }
+    }
+  }
+  
+  return outFrame16x16;
+}

@@ -10,11 +10,15 @@
 
 bool deviceStatus = false; // false = stopped, true = logging
 
+// Buffer for downsampled 16x16 RGB565 frame (256 pixels * 2 bytes = 512 bytes)
+uint16_t downsampled16x16[256];  // Shared with BLE for transmission
+
 void setup() {
   initPins();
   initPeripherals();
   initLed();
   initSD();
+  initSessionFolder();  // Create timestamped folder structure
   uiInit();
   initmmWave();
   initBLE();
@@ -36,8 +40,8 @@ void loop() {
     performOTAUpdate();
   }
   
-  // Process any pending BLE operations (like sending RGB frame)
-  processBLETasks();
+  // TODO: Process BLE tasks with down-sampled 16x16 image (4x4 pixel averaging from 64x64)
+  // processBLETasks();  // Disabled for now - will update with averaged RGB565 image
   
   if (deviceConnected && timerStream == 1 && deviceStatus == 1) {
 
@@ -75,6 +79,22 @@ void loop() {
               String(ambLight_Int);
     
     logData(dataRow);
+    
+    // Log microphone and accelerometer samples if available
+    if (slaveData != nullptr) {
+      logMicAccelSamples(slaveData->accelX_samples, slaveData->accelY_samples, 
+                         slaveData->accelZ_samples, slaveData->microphoneSamples, 
+                         slaveData->accelSampleCount);
+    }
+    
+    // Downsample 64x64 RGB frame to 16x16 for BLE transmission (4x4 pixel averaging)
+    uint16_t* rgbFrame = getLastRGBFrame();
+    if (rgbFrame != nullptr) {
+      downsampleRGBFrame(rgbFrame, downsampled16x16);
+      Serial.println("[BLE] Downsampled RGB 64x64 -> 16x16 (ready for transmission)");
+    }
+    
+    // Send all notifications (includes downsampled images)
     notifyAll();
     
     timerStream = 0;
