@@ -5,7 +5,7 @@ import os
 # Configuration
 width, height = 64, 64
 # Path to your SD card color camera folder
-input_dir = "/media/deso/BOOT/20260326_13194/color_camera/"
+input_dir = "/media/deso/BOOT/20260326_18263/color_camera/"
 output_dir = "./color_processed"
 os.makedirs(output_dir, exist_ok=True)
 

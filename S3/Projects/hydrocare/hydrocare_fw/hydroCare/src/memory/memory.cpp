@@ -33,7 +33,7 @@ void initSD(){
 
   Serial.print("Mounting SD Card... ");
 
-  if (!SD.begin(SD_CS)) {
+  if (!SD.begin(SD_CS,SPI, 40000000)) {
     for(int i=0; i<5; i++){
         Serial.println("Error: Card not found or wiring incorrect.");
         delay(500);
@@ -102,8 +102,8 @@ String getMicAccelPath() {
 void openMicAccelFile() {
   String micAccelFile = getMicAccelPath();
   
-  // Create header showing the data type and first few sample indices
-  String header = "sample_type,val_1,val_2,val_3,val_4,val_5,...,val_2000";
+  // Create header for column format
+  String header = "timestamp_ms,mic,accelX,accelY,accelZ";
   
   File file = SD.open(micAccelFile.c_str(), FILE_WRITE);
   if (!file) {
@@ -121,8 +121,8 @@ void openMicAccelFile() {
 
 
 // Log 2000 microphone & accelerometer samples to mic&accel CSV
-// Pattern: Row 1 = mic, Row 2 = accelX, Row 3 = accelY, Row 4 = accelZ, repeat
-void logMicAccelSamples(int16_t* accelX, int16_t* accelY, int16_t* accelZ, uint16_t* mic, uint16_t sampleCount) {
+// Column format: timestamp, mic, accelX, accelY, accelZ (2000 rows)
+void logMicAccelSamples(int16_t* accelX, int16_t* accelY, int16_t* accelZ, uint16_t* mic, uint16_t sampleCount, uint32_t timestamp) {
   String micAccelFile = getMicAccelPath();
   
   if (sampleCount == 0) {
@@ -133,48 +133,47 @@ void logMicAccelSamples(int16_t* accelX, int16_t* accelY, int16_t* accelZ, uint1
   // Ensure we don't exceed 2000 samples
   if (sampleCount > 2000) sampleCount = 2000;
   
-  // Log mic samples (Row 1)
-  String micRow = "mic,";
-  for (uint16_t i = 0; i < sampleCount; i++) {
-    micRow += String(mic[i]);
-    if (i < sampleCount - 1) micRow += ",";
-  }
-  
-  // Log accelX samples (Row 2)
-  String accelXRow = "accelX,";
-  for (uint16_t i = 0; i < sampleCount; i++) {
-    accelXRow += String(accelX[i]);
-    if (i < sampleCount - 1) accelXRow += ",";
-  }
-  
-  // Log accelY samples (Row 3)
-  String accelYRow = "accelY,";
-  for (uint16_t i = 0; i < sampleCount; i++) {
-    accelYRow += String(accelY[i]);
-    if (i < sampleCount - 1) accelYRow += ",";
-  }
-  
-  // Log accelZ samples (Row 4)
-  String accelZRow = "accelZ,";
-  for (uint16_t i = 0; i < sampleCount; i++) {
-    accelZRow += String(accelZ[i]);
-    if (i < sampleCount - 1) accelZRow += ",";
-  }
-  
-  // Write all 4 rows to file
   File file = SD.open(micAccelFile, FILE_APPEND);
   if (!file) {
     Serial.println("Failed to open mic&accel file for appending");
     return;
   }
   
-  if (file.println(micRow) && file.println(accelXRow) && file.println(accelYRow) && file.println(accelZRow)) {
-    Serial.println("Mic/Accel samples logged (" + String(sampleCount) + " samples)");
-  } else {
-    Serial.println("Mic/Accel write failed");
+  // Burst write: Build entire CSV in buffer first, then write once
+  // Allocate buffer for all 2000 rows (~65 KB)
+  size_t bufferSize = sampleCount * 50; // Conservative estimate: ~50 bytes per row with newline
+  char* csvBuffer = (char*)malloc(bufferSize);
+  
+  if (!csvBuffer) {
+    Serial.println("Failed to allocate buffer for burst write");
+    file.close();
+    return;
   }
   
+  size_t offsetPos = 0;
+  
+  // Build entire CSV content in buffer
+  for (uint16_t i = 0; i < sampleCount; i++) {
+    int written = snprintf(csvBuffer + offsetPos, bufferSize - offsetPos, "%u,%u,%d,%d,%d\n",
+      timestamp,
+      mic[i],
+      accelX[i],
+      accelY[i],
+      accelZ[i]
+    );
+    if (written > 0) {
+      offsetPos += written;
+    }
+  }
+  
+  // Burst write entire buffer at once
+  if (offsetPos > 0) {
+    file.write((uint8_t*)csvBuffer, offsetPos);
+  }
+  
+  free(csvBuffer);
   file.close();
+  Serial.println("Mic/Accel samples logged (" + String(sampleCount) + " samples, burst write)");
 }
 
 // Initialize sensor data CSV file with comprehensive header
@@ -228,23 +227,8 @@ void logSensorData(uint32_t timestamp, float batteryPct, float ambLight, float p
   file.close();
 }
 
-// Convert RGB565/BGR565 to RGB888 exactly like OpenCV's COLOR_BGR5652BGR
-// Takes 2 raw bytes (little-endian) and converts to R, G, B
-void rgb565ToRgb888(uint16_t rgb565, uint8_t* r, uint8_t* g, uint8_t* b) {
-  // Interpret as BGR565 (BBBBB GGGGGG RRRRR) in little-endian
-  // This matches OpenCV's COLOR_BGR5652BGR conversion
-  uint8_t r5 = (rgb565 & 0x1F);           // Bits 0-4: Red (5 bits)
-  uint8_t g6 = ((rgb565 >> 5) & 0x3F);   // Bits 5-10: Green (6 bits)
-  uint8_t b5 = ((rgb565 >> 11) & 0x1F);  // Bits 11-15: Blue (5 bits)
-  
-  // Scale from their bit-width to 8-bit
-  *r = (r5 << 3) | (r5 >> 2);     // 5-bit → 8-bit (shift left 3, add top 2 bits)
-  *g = (g6 << 2) | (g6 >> 4);     // 6-bit → 8-bit (shift left 2, add top 2 bits)
-  *b = (b5 << 3) | (b5 >> 2);     // 5-bit → 8-bit (shift left 3, add top 2 bits)
-}
-
-// Save RGB565 image as PPM file (directly openable)
-// PPM: 64x64 image with RGB888 pixel data (~12.3 KB)
+// Save RGB565 image as raw binary file (.rgb565)
+// Raw binary: 64x64 image with RGB565 pixel data (8192 bytes)
 void saveRGBImage(uint16_t* rgbFrame, uint32_t timestamp) {
   if (rgbFrame == nullptr) {
     Serial.println("[RGB] No frame data to save");
@@ -253,11 +237,12 @@ void saveRGBImage(uint16_t* rgbFrame, uint32_t timestamp) {
   
   // Create filename with timestamp
   char filename[64];
-  snprintf(filename, sizeof(filename), "%s/color_camera/%u.ppm", sessionFolder.c_str(), timestamp);
+  snprintf(filename, sizeof(filename), "%s/color_camera/%u.rgb565", sessionFolder.c_str(), timestamp);
   
-  // PPM image: 64x64 pixels
+  // RGB565 image: 64x64 pixels = 4096 pixels * 2 bytes = 8192 bytes
   const uint16_t width = 64;
   const uint16_t height = 64;
+  const size_t dataSize = width * height * sizeof(uint16_t);
   
   File file = SD.open(filename, FILE_WRITE);
   if (!file) {
@@ -265,60 +250,14 @@ void saveRGBImage(uint16_t* rgbFrame, uint32_t timestamp) {
     return;
   }
   
-  // Write PPM header
-  // P6 = binary RGB format
-  file.println("P6");
-  file.printf("%d %d\n", width, height);
-  file.println("255");  // Max color value
-  
-  uint32_t fileSize = 0;
-  // Write RGB888 pixel data (3 bytes per pixel)
-  for (int i = 0; i < width * height; i++) {
-    uint16_t rgb565 = rgbFrame[i];
-    uint8_t r, g, b;
-    rgb565ToRgb888(rgb565, &r, &g, &b);
-    
-    file.write(r);
-    file.write(g);
-    file.write(b);
-    fileSize += 3;
-  }
-  
+  // Burst write: write all RGB565 data in one call (8KB raw binary)
+  size_t bytesWritten = file.write((uint8_t*)rgbFrame, dataSize);
   file.close();
-  // PPM header is ~21 bytes + 12288 bytes data = ~12309 bytes
-  Serial.printf("[RGB] PPM image saved: %s (%u bytes)\n", filename, fileSize + 21);
+  
+  Serial.printf("[RGB] Raw RGB565 saved: %s (%zu bytes, burst write)\n", filename, bytesWritten);
 }
 
-// Save IR thermal image as raw binary
-// IR thermal: 16x12 pixels (192 pixels * 2 bytes = 384 bytes)
-
-// Thermal colormap: maps 8-bit value (0-255) to RGB
-// Blue (cold) → Cyan → Green → Yellow → Red (hot)
-void getThermalColor(uint8_t value, uint8_t* r, uint8_t* g, uint8_t* b) {
-  // Simple thermal colormap with 5 keypoints
-  if (value < 64) {
-    // Blue to Cyan (0-64)
-    *r = 0;
-    *g = (value * 4);  // 0 to 255
-    *b = 255;
-  } else if (value < 128) {
-    // Cyan to Green (64-128)
-    *r = 0;
-    *g = 255;
-    *b = (255 - (value - 64) * 4);  // 255 to 0
-  } else if (value < 192) {
-    // Green to Yellow (128-192)
-    *r = (value - 128) * 4;  // 0 to 255
-    *g = 255;
-    *b = 0;
-  } else {
-    // Yellow to Red (192-255)
-    *r = 255;
-    *g = (255 - (value - 192) * 4);  // 255 to 0
-    *b = 0;
-  }
-}
-
+// Save IR thermal image as CSV (16x12 grid of decimal values)
 void saveIRImage(uint16_t* irFrame, uint32_t timestamp) {
   if (irFrame == nullptr) {
     Serial.println("[IR] No frame data to save");
@@ -327,7 +266,7 @@ void saveIRImage(uint16_t* irFrame, uint32_t timestamp) {
   
   // Create filename with timestamp
   char filename[64];
-  snprintf(filename, sizeof(filename), "%s/thermal_camera/%u.ppm", sessionFolder.c_str(), timestamp);
+  snprintf(filename, sizeof(filename), "%s/thermal_camera/%u.csv", sessionFolder.c_str(), timestamp);
   
   // IR thermal image: 16x12 pixels
   const uint16_t width = 16;
@@ -339,38 +278,28 @@ void saveIRImage(uint16_t* irFrame, uint32_t timestamp) {
     return;
   }
   
-  // Find min and max for normalization (critical for 16-bit data)
-  uint16_t minVal = 65535, maxVal = 0;
-  for (int i = 0; i < width * height; i++) {
-    if (irFrame[i] < minVal) minVal = irFrame[i];
-    if (irFrame[i] > maxVal) maxVal = irFrame[i];
-  }
-  if (maxVal == minVal) maxVal = minVal + 1;  // Avoid division by zero
-  
-  // Write PPM header
-  // P6 = binary RGB format
-  file.println("P6");
-  file.printf("%d %d\n", width, height);
-  file.println("255");  // Max color value
-  
-  uint32_t fileSize = 0;
-  // Write thermal-colorized RGB888 pixel data (3 bytes per pixel)
-  for (int i = 0; i < width * height; i++) {
-    // Normalize 16-bit value to 8-bit (0-255)
-    uint16_t ir16 = irFrame[i];
-    uint8_t normalized = (uint8_t)(((ir16 - minVal) * 255) / (maxVal - minVal));
-    
-    // Apply thermal colormap
-    uint8_t r, g, b;
-    getThermalColor(normalized, &r, &g, &b);
-    
-    file.write(r);
-    file.write(g);
-    file.write(b);
-    fileSize += 3;
+  // Write thermal data as 12 rows x 16 columns CSV with decimal values
+  size_t bytesWritten = 0;
+  for (int row = 0; row < height; row++) {
+    for (int col = 0; col < width; col++) {
+      uint16_t value = irFrame[row * width + col];
+      
+      // Write decimal value
+      char buffer[16];
+      int len = snprintf(buffer, sizeof(buffer), "%u", value);
+      bytesWritten += file.write((uint8_t*)buffer, len);
+      
+      // Add comma separator except for last column
+      if (col < width - 1) {
+        file.write(',');
+        bytesWritten++;
+      }
+    }
+    // Add newline at end of row
+    file.println();
+    bytesWritten += 2;  // \r\n
   }
   
   file.close();
-  // PPM header is ~23 bytes + 576 bytes data = ~599 bytes
-  Serial.printf("[IR] Thermal PPM saved: %s (%u bytes)\n", filename, fileSize + 23);
+  Serial.printf("[IR] Thermal CSV saved: %s (%zu bytes)\n", filename, bytesWritten);
 }

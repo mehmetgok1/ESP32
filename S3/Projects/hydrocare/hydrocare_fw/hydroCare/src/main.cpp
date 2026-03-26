@@ -49,6 +49,7 @@ void loop() {
     
     Serial.println("\n========== MAIN LOOP CYCLE START ==========");
     
+    // ==================== SENSOR ACQUISITION PHASE ====================
     // Measure all local sensors
     startTime = millis();
     measureBatteryLevel();
@@ -83,8 +84,11 @@ void loop() {
       ambLight_Int = slaveData->ambientLight;
     }
     
-    // ==================== LOG SENSOR DATA ====================
+    // ==================== SD CARD LOGGING PHASE ====================
+    // All SD operations grouped together: open once, write all, close once
     startTime = millis();
+    
+    // LOG SENSOR DATA
     logSensorData(currentTimestamp, 
                   batteryPercentage,
                   ambLight,
@@ -97,46 +101,42 @@ void loop() {
                   ambLight_Int,
                   slaveData != nullptr ? slaveData->humidity : 0.0f,
                   slaveData != nullptr ? slaveData->temperature : 0.0f);
-    duration = millis() - startTime;
-    Serial.printf("[TIMER] logSensorData: %u ms\n", duration);
+    Serial.printf("[SD] Sensor data logged: ts=%u ms\n", currentTimestamp);
     
-    // ==================== LOG MIC & ACCEL SAMPLES ====================
+    // LOG MIC & ACCEL SAMPLES
     if (slaveData != nullptr) {
-      startTime = millis();
       logMicAccelSamples(slaveData->accelX_samples, slaveData->accelY_samples, 
                          slaveData->accelZ_samples, slaveData->microphoneSamples, 
-                         slaveData->accelSampleCount);
-      duration = millis() - startTime;
-      Serial.printf("[TIMER] logMicAccelSamples: %u ms\n", duration);
+                         slaveData->accelSampleCount, currentTimestamp);
     }
     
-    // ==================== SAVE COLOR CAMERA (RGB565) ====================
+    // SAVE COLOR CAMERA (RGB565)
     if (slaveData != nullptr) {
-      startTime = millis();
       saveRGBImage(slaveData->rgbFrame, currentTimestamp);
-      duration = millis() - startTime;
-      Serial.printf("[TIMER] saveRGBImage: %u ms\n", duration);
-      
-      // Downsample 64x64 RGB frame to 16x16 for BLE transmission
-      downsampleRGBFrame(slaveData->rgbFrame, downsampled16x16);
     }
     
-    // ==================== SAVE THERMAL CAMERA (IR) ====================
+    // SAVE THERMAL CAMERA (IR)
     if (slaveData != nullptr) {
-      startTime = millis();
       saveIRImage(slaveData->irFrame, currentTimestamp);
-      duration = millis() - startTime;
-      Serial.printf("[TIMER] saveIRImage: %u ms\n", duration);
-      
-      // Copy 16x12 IR frame for BLE transmission
+    }
+    
+    duration = millis() - startTime;
+    Serial.printf("[TIMER] SD LOGGING BATCH: %u ms\n", duration);
+    
+    // ==================== BLE NOTIFICATION PHASE ====================
+    startTime = millis();
+    
+    // Downsample 64x64 RGB frame to 16x16 for BLE transmission
+    if (slaveData != nullptr) {
+      downsampleRGBFrame(slaveData->rgbFrame, downsampled16x16);
       memcpy(irFrame16x12, slaveData->irFrame, sizeof(irFrame16x12));
     }
     
-    // ==================== SEND BLE NOTIFICATIONS ====================
-    startTime = millis();
+    // Send BLE notifications
     notifyAll();
+    
     duration = millis() - startTime;
-    Serial.printf("[TIMER] notifyAll (BLE): %u ms\n", duration);
+    Serial.printf("[TIMER] BLE PHASE: %u ms\n", duration);
     
     // Print total loop cycle time
     uint32_t totalCycleDuration = millis() - loopCycleStart;

@@ -3,7 +3,7 @@
 #include "ui/ui.h"
 #include "measurement/measurement.h"
 
-int timerValue = 100000;
+int timerValue = 1000000;  // 1 second (1,000,000 microseconds at 1 MHz tick rate)
 bool timerStream = 0;
 
 hw_timer_t* timer = NULL;

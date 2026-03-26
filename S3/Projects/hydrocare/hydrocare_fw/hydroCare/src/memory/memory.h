@@ -18,7 +18,7 @@ String getSensorDataPath();        // Get path for sensor CSV
 String getColorCameraPath();       // Get path for color camera folder
 String getThermalCameraPath();     // Get path for thermal camera folder
 String getMicAccelPath();          // Get path for mic&accel CSV
-void logMicAccelSamples(int16_t* accelX, int16_t* accelY, int16_t* accelZ, uint16_t* mic, uint16_t sampleCount);
+void logMicAccelSamples(int16_t* accelX, int16_t* accelY, int16_t* accelZ, uint16_t* mic, uint16_t sampleCount, uint32_t timestamp);
 void logData(String data);
 void logSensorData(uint32_t timestamp, float batteryPct, float ambLight, float pir, float mmWaveDist, float mmWaveEnergy, 
                    float staticDist, float staticEnergy, float detectionDist, float ambLight_slave, float humidity, float temperature);
