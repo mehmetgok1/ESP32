@@ -306,12 +306,12 @@ SensorDataPacket* readSlaveData() {
   // Microphone statistics
   /*uint16_t micMin = 65535, micMax = 0;
   uint32_t micSum = 0;
-  for (int i = 0; i < 1000; i++) {
+  for (int i = 0; i < 2000; i++) {
     if (packet->microphoneSamples[i] < micMin) micMin = packet->microphoneSamples[i];
     if (packet->microphoneSamples[i] > micMax) micMax = packet->microphoneSamples[i];
     micSum += packet->microphoneSamples[i];
   }
-  uint16_t micAvg = micSum / 1000;
+  uint16_t micAvg = micSum / 2000;
   Serial.printf("[Microphone] Avg=%u | Min=%u Max=%u | Sample[0-4]: %u %u %u %u %u\n", 
     micAvg, micMin, micMax, 
     packet->microphoneSamples[0], packet->microphoneSamples[1], packet->microphoneSamples[2], 

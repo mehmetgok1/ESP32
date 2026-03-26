@@ -103,7 +103,7 @@ void openMicAccelFile() {
   String micAccelFile = getMicAccelPath();
   
   // Create header showing the data type and first few sample indices
-  String header = "sample_type,val_1,val_2,val_3,val_4,val_5,...,val_1000";
+  String header = "sample_type,val_1,val_2,val_3,val_4,val_5,...,val_2000";
   
   File file = SD.open(micAccelFile.c_str(), FILE_WRITE);
   if (!file) {
@@ -120,7 +120,7 @@ void openMicAccelFile() {
 
 
 
-// Log 1000 microphone & accelerometer samples to mic&accel CSV
+// Log 2000 microphone & accelerometer samples to mic&accel CSV
 // Pattern: Row 1 = mic, Row 2 = accelX, Row 3 = accelY, Row 4 = accelZ, repeat
 void logMicAccelSamples(int16_t* accelX, int16_t* accelY, int16_t* accelZ, uint16_t* mic, uint16_t sampleCount) {
   String micAccelFile = getMicAccelPath();
@@ -130,8 +130,8 @@ void logMicAccelSamples(int16_t* accelX, int16_t* accelY, int16_t* accelZ, uint1
     return;
   }
   
-  // Ensure we don't exceed 1000 samples
-  if (sampleCount > 1000) sampleCount = 1000;
+  // Ensure we don't exceed 2000 samples
+  if (sampleCount > 2000) sampleCount = 2000;
   
   // Log mic samples (Row 1)
   String micRow = "mic,";

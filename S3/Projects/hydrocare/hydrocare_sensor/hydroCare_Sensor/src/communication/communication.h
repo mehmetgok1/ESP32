@@ -29,7 +29,7 @@
 #define STATUS_LOCKED 0x04          // Buffers locked and ready for bulk read
 
 // Constants
-#define SPI_BUFFER_SIZE 20480       // 20KB - handles ~16.6KB packet + header + margin
+#define SPI_BUFFER_SIZE 25600       // 25.6KB - handles ~24.6KB packet (2k samples) + header + margin
 
 // ============ DATA STRUCTURES ============
 // Sensor data packet structure with high-speed samples (~16.6KB)
@@ -44,13 +44,13 @@ typedef struct {
   int16_t gyroX, gyroY, gyroZ;    // IMU gyro (unused, zeros)
   uint32_t timestamp_ms;          // System uptime when measurement triggered
   uint8_t status;                 // Status flags
-  uint16_t accelSampleCount;      // Number of accel/mic samples in this packet (1000)
+  uint16_t accelSampleCount;      // Number of accel/mic samples in this packet (2000)
   
-  // High-speed samples (1kHz sampling over 1 second measurement window)
-  int16_t accelX_samples[1000];    // 1000 accel X samples @ 1kHz = 1 second
-  int16_t accelY_samples[1000];    // 1000 accel Y samples @ 1kHz = 1 second
-  int16_t accelZ_samples[1000];    // 1000 accel Z samples @ 1kHz = 1 second
-  uint16_t microphoneSamples[1000];// 1000 microphone samples @ 1kHz = 1 second
+  // High-speed samples (2kHz sampling over 1 second measurement window)
+  int16_t accelX_samples[2000];    // 2000 accel X samples @ 2kHz = 1 second
+  int16_t accelY_samples[2000];    // 2000 accel Y samples @ 2kHz = 1 second
+  int16_t accelZ_samples[2000];    // 2000 accel Z samples @ 2kHz = 1 second
+  uint16_t microphoneSamples[2000];// 2000 microphone samples @ 2kHz = 1 second
   
   // Slow sensor frames (camera data)
   uint16_t rgbFrame[4096];        // RGB565 64x64 (8192 bytes)
@@ -63,7 +63,7 @@ typedef struct {
 void initSPIComm();
 void receiveCommand();
 void startMeasurementTask();          // Start background measurement collector task
-void startHighSpeedSamplerTask();     // Start 1kHz accel+mic sampler task
+void startHighSpeedSamplerTask();     // Start 2kHz accel+mic sampler task
 void startIRSensorTask();             // Start background IR thermal sensor task (200ms)
 void startBMESensorTask();            // Start background BME688 sensor task (200ms)
 

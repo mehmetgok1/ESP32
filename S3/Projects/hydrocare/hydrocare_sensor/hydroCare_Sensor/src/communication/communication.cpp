@@ -19,8 +19,8 @@ uint8_t *txBuf;
 static spi_slave_transaction_t slaveSpiTransaction = {};
 static uint32_t transaction_count = 0;
 
-// ============ High-Speed Sampling Ring Buffers (1kHz) ============
-// 5000-sample buffer = 5 seconds of continuous data @ 1kHz
+// ============ High-Speed Sampling Ring Buffers (2kHz) ============
+// 5000-sample buffer = 2.5 seconds of continuous data @ 2kHz
 // Large buffer prevents race condition: sampler index always moves far ahead of read position
 const int RING_BUFFER_SIZE = 5000;  // 5 seconds of 1kHz data
 int16_t accelX_ring[RING_BUFFER_SIZE] = {0};
@@ -174,27 +174,27 @@ void collectMeasurementData() {
   currentData.ambientLight = ambLight;
   Serial.printf("[Debug] ✓ Ambient light: %d | Time: %lu ms\n", ambLight, millis() - stepTime);
   
-  // 2. Grab high-speed accel + mic samples from ring buffer (last 1000 @ 1kHz = 1 second of data)
-  Serial.println("[Debug] Step 2: Snapshot 1000 accel+mic samples from ring buffer...");
+  // 2. Grab high-speed accel + mic samples from ring buffer (last 2000 @ 2kHz = 1 second of data)
+  Serial.println("[Debug] Step 2: Snapshot 2000 accel+mic samples from ring buffer...");
   stepTime = millis();
   
-  // Calculate start index (1000 samples back from current write position)
+  // Calculate start index (2000 samples back from current write position)
   // Capture endIdx FIRST - even if sampler advances during copy, we use this snapshot
   int endIdx = ringBufferIndex;
-  int startIdx = (endIdx - 1000 + RING_BUFFER_SIZE) % RING_BUFFER_SIZE;
+  int startIdx = (endIdx - 2000 + RING_BUFFER_SIZE) % RING_BUFFER_SIZE;
   
-  // Copy 1000 consecutive samples into packet
+  // Copy 2000 consecutive samples into packet
   // RACE CONDITION SAFE: 5000-sample buffer is large enough that sampler can't catch up
-  // While copying (20ms max), sampler advances only ~20 positions
+  // While copying (40ms max), sampler advances only ~80 positions (2000 samples = 1 second at 2kHz)
   // With 5000 total slots, there's always massive separation. No overwrite risk!
-  for (int i = 0; i < 1000; i++) {
+  for (int i = 0; i < 2000; i++) {
     int srcIdx = (startIdx + i) % RING_BUFFER_SIZE;
     currentData.accelX_samples[i] = accelX_ring[srcIdx];
     currentData.accelY_samples[i] = accelY_ring[srcIdx];
     currentData.accelZ_samples[i] = accelZ_ring[srcIdx];
     currentData.microphoneSamples[i] = microphone_ring[srcIdx];
   }
-  currentData.accelSampleCount = 1000;  // Full 1 second of 1kHz data
+  currentData.accelSampleCount = 2000;  // Full 1 second of 2kHz data
   
   // Also store most recent single values for backward compatibility
   currentData.accelX = accelX_ring[endIdx > 0 ? endIdx - 1 : RING_BUFFER_SIZE - 1];
@@ -204,8 +204,8 @@ void collectMeasurementData() {
   currentData.gyroY = 0;
   currentData.gyroZ = 0;
   
-  Serial.printf("[Debug] ✓ Accel+Mic samples: Count=%d (full 1 second), Last=[X:%d Y:%d Z:%d Mic:%d] | Time: %lu ms\n", 
-    1000, currentData.accelX, currentData.accelY, currentData.accelZ, microphone_ring[endIdx > 0 ? endIdx - 1 : RING_BUFFER_SIZE - 1], millis() - stepTime);
+  Serial.printf("[Debug] ✓ Accel+Mic samples: Count=%d (full 1 second @ 2kHz), Last=[X:%d Y:%d Z:%d Mic:%d] | Time: %lu ms\n", 
+    2000, currentData.accelX, currentData.accelY, currentData.accelZ, microphone_ring[endIdx > 0 ? endIdx - 1 : RING_BUFFER_SIZE - 1], millis() - stepTime);
   
   // 3. IR temperature frame - GRAB FROM CACHE (background task updates every 200ms)
   Serial.println("[Debug] Step 3: Grabbing cached IR thermal...");
@@ -403,35 +403,46 @@ static void bmeSensorBackgroundTask(void *pvParameters) {
   }
 }
 
-// ============ High-Speed Sampler Task (1kHz on Core 0) ============
-// Runs independently, sampling accel + mic every 1ms
+// ============ High-Speed Sampler Task (2kHz on Core 1) ============
+// Precise microsecond-level sampling for DFT analysis
+// 2000 samples/second = 500µs intervals
 // Results stored in ring buffers (no mutex needed - single writer)
 static void highSpeedSamplerTask(void *pvParameters) {
-  TickType_t lastWakeTime = xTaskGetTickCount();
+  int64_t lastSampleTime_us = 0;
+  int64_t targetInterval_us = 500;  // 2kHz = one sample every 500 microseconds
   
-  Serial.println("[HighSpeedSampler] ⚙️ Started - Sampling accel + mic @ 1kHz");
+  Serial.println("[HighSpeedSampler] ⚙️ Started - Sampling accel + mic @ 2kHz (precise microsecond timing)");
+  
+  // Initialize reference time
+  lastSampleTime_us = esp_timer_get_time();
   
   while (1) {
-    // Precise 1ms timing using vTaskDelayUntil
-    vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(1));
+    // Get current time
+    int64_t now_us = esp_timer_get_time();
     
-    // Read acceleration (FSPI)
-    readAcceleration();
+    // Check if time for next sample (500µs interval)
+    if ((now_us - lastSampleTime_us) >= targetInterval_us) {
+      lastSampleTime_us = now_us;
+      
+      // Read acceleration (FSPI - ~200µs)
+      readAcceleration();
+      
+      // Read microphone (ADC - very fast ~10µs)
+      measureMicrophone();
+      
+      // Store in ring buffer (atomic write, single writer)
+      int idx = ringBufferIndex;
+      accelX_ring[idx] = (int16_t)(ax * 1000);
+      accelY_ring[idx] = (int16_t)(ay * 1000);
+      accelZ_ring[idx] = (int16_t)(az * 1000);
+      microphone_ring[idx] = microphone;
+      
+      // Advance ring buffer index
+      ringBufferIndex = (ringBufferIndex + 1) % RING_BUFFER_SIZE;
+    }
     
-    // Read microphone (ADC - very fast)
-    measureMicrophone();
-    
-    // Store in ring buffer (atomic write, single writer)
-    int idx = ringBufferIndex;
-    accelX_ring[idx] = (int16_t)(ax * 1000);
-    accelY_ring[idx] = (int16_t)(ay * 1000);
-    accelZ_ring[idx] = (int16_t)(az * 1000);
-    microphone_ring[idx] = microphone;
-    
-    // Advance ring buffer index
-    ringBufferIndex = (ringBufferIndex + 1) % RING_BUFFER_SIZE;
-    
-    // Yield to allow other tasks (especially idle task for watchdog) to run
+    // Yield to allow other tasks to run (watchdog, SPI handler, etc)
+    // This prevents starving the whole system
     taskYIELD();
   }
 }
@@ -581,7 +592,7 @@ void startHighSpeedSamplerTask() {
     &samplerTaskHandle,
     1               // Core 1 (dedicated to sampling, Core 0 free for SPI + measurement)
   );
-  Serial.println("[Slave] High-speed sampler task created on Core 1 @ 1kHz");
+  Serial.println("[Slave] High-speed sampler task created on Core 1 @ 2kHz");
 }
 
 // Start the IR sensor background task (continuous 200ms sampling with caching)
