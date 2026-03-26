@@ -1,5 +1,7 @@
 #include "ble.h"
 #include <NimBLEDevice.h>
+#include <sys/time.h>
+#include <time.h>
 #include "measurement/measurement.h"
 #include "timer/timer.h"
 #include "ota/ota.h"
@@ -13,6 +15,9 @@
 bool deviceConnected = false;
 bool sendRgbFlag = false;
 bool sendIrFlag = false;
+
+// Session synchronization flag
+extern bool sessionInitialized;  // Set to true when folder/files are ready
 
 // External buffers from main.cpp and communication functions
 extern uint16_t downsampled16x16[256];  // 16x16 downsampled RGB frame
@@ -90,11 +95,13 @@ class ActionCallbacks: public NimBLECharacteristicCallbacks {
                 openMicAccelFile();   // Initialize mic&accel CSV with header
                 initSensorDataFile(); // Initialize sensor data CSV with header
                 
+                sessionInitialized = true;  // NOW safe to log
                 Serial.println("[BLE] Session files ready for logging");
             }
             // --- STOP PARSER ---
             else if(command.startsWith("Com;Stop")){
                 deviceStatus = 0;
+                sessionInitialized = false;  // Reset for next session
                 Serial.println("[SD] Stop Logging. Closing file.");
                 // The logData function closes the file after every write, 
                 // but you can add a final sync or serial log here.
@@ -135,6 +142,32 @@ class ActionCallbacks: public NimBLECharacteristicCallbacks {
                 Serial.println("[BLE] Command Frames received. Queueing RGB and IR frame transmission...");
                 sendRgbFlag = true;
                 sendIrFlag = true;
+            }
+            // --- SET TIME PARSER ---
+            else if (command.startsWith("Com;SetTime")) {
+                int firstSemi = command.indexOf(';');
+                int secondSemi = command.indexOf(';', firstSemi + 1);
+                
+                if (secondSemi != -1) {
+                    String timestampStr = command.substring(secondSemi + 1);
+                    timestampStr.trim();
+                    time_t timestamp = timestampStr.toInt();
+                    
+                    if (timestamp > 0) {
+                        struct timeval tv;
+                        tv.tv_sec = timestamp;
+                        tv.tv_usec = 0;
+                        settimeofday(&tv, NULL);
+                        
+                        // Show confirmation
+                        time_t now = time(nullptr);
+                        char timeStr[30];
+                        strftime(timeStr, sizeof(timeStr), "%Y%m%d_%H%M%S", localtime(&now));
+                        Serial.printf("[BLE] System time set to: %s\n", timeStr);
+                    } else {
+                        Serial.println("[BLE] Invalid timestamp");
+                    }
+                }
             }
         }
     }

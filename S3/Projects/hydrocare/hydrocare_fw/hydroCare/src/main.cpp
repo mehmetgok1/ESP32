@@ -9,6 +9,7 @@
 #include "communication/communication.h"
 
 bool deviceStatus = false; // false = stopped, true = logging
+bool sessionInitialized = false; // true = session folders and files ready
 
 // Buffer for downsampled 16x16 RGB565 frame (256 pixels * 2 bytes = 512 bytes)
 uint16_t downsampled16x16[256];  // Shared with BLE for transmission
@@ -42,7 +43,7 @@ void loop() {
     connectToWiFi();
     performOTAUpdate();
   }
-  if (deviceConnected && timerStream == 1 && deviceStatus == 1) {
+  if (deviceConnected && timerStream == 1 && deviceStatus == 1 && sessionInitialized) {
     uint32_t loopCycleStart = millis();
     uint32_t startTime, duration;
     

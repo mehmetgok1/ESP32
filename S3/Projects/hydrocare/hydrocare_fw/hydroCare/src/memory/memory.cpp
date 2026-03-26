@@ -228,21 +228,22 @@ void logSensorData(uint32_t timestamp, float batteryPct, float ambLight, float p
   file.close();
 }
 
-// Save RGB565 image as BMP file
-// RGB565: 64x64 image (4096 pixels)
+// Save RGB565 image as raw binary
+// RGB565: 64x64 image (4096 pixels * 2 bytes = 8192 bytes)
 void saveRGBImage(uint16_t* rgbFrame, uint32_t timestamp) {
   if (rgbFrame == nullptr) {
     Serial.println("[RGB] No frame data to save");
     return;
   }
   
-  // Create filename with timestamp: YYYYMMDD_HHMMSS_ms.bmp
+  // Create filename with timestamp
   char filename[64];
-  snprintf(filename, sizeof(filename), "%s/color_camera/%u.bmp", sessionFolder.c_str(), timestamp);
+  snprintf(filename, sizeof(filename), "%s/color_camera/%u.rgb565", sessionFolder.c_str(), timestamp);
   
   // RGB565 image: 64x64 pixels
   const uint16_t width = 64;
   const uint16_t height = 64;
+  uint32_t dataSize = width * height * 2;  // 8192 bytes
   
   File file = SD.open(filename, FILE_WRITE);
   if (!file) {
@@ -250,45 +251,15 @@ void saveRGBImage(uint16_t* rgbFrame, uint32_t timestamp) {
     return;
   }
   
-  // BMP Header (54 bytes)
-  uint8_t bmpHeader[54];
-  uint32_t fileSize = 54 + (width * height * 2);  // Header + RGB565 data
-  uint32_t pixelDataOffset = 54;
-  uint16_t bitsPerPixel = 16;
-  
-  // BMP File Header (14 bytes)
-  bmpHeader[0] = 'B';
-  bmpHeader[1] = 'M';
-  *(uint32_t*)&bmpHeader[2] = fileSize;
-  *(uint16_t*)&bmpHeader[6] = 0;  // Reserved
-  *(uint16_t*)&bmpHeader[8] = 0;  // Reserved
-  *(uint32_t*)&bmpHeader[10] = pixelDataOffset;
-  
-  // BMP Info Header (40 bytes)
-  *(uint32_t*)&bmpHeader[14] = 40;  // Header size
-  *(int32_t*)&bmpHeader[18] = width;
-  *(int32_t*)&bmpHeader[22] = height;
-  *(uint16_t*)&bmpHeader[26] = 1;  // Color planes
-  *(uint16_t*)&bmpHeader[28] = bitsPerPixel;
-  *(uint32_t*)&bmpHeader[30] = 0;  // Compression (0 = none)
-  *(uint32_t*)&bmpHeader[34] = 0;  // Image size
-  *(int32_t*)&bmpHeader[38] = 2835;  // X pixels per meter
-  *(int32_t*)&bmpHeader[42] = 2835;  // Y pixels per meter
-  *(uint32_t*)&bmpHeader[46] = 0;  // Color table entries
-  *(uint32_t*)&bmpHeader[50] = 0;  // Important colors
-  
-  // Write headers
-  file.write(bmpHeader, 54);
-  
-  // Write RGB565 pixel data (already in correct format)
-  file.write((uint8_t*)rgbFrame, width * height * 2);
+  // Write raw RGB565 pixel data (no header)
+  file.write((uint8_t*)rgbFrame, dataSize);
   
   file.close();
-  Serial.printf("[RGB] Image saved: %s (%u bytes)\n", filename, fileSize);
+  Serial.printf("[RGB] Image saved: %s (%u bytes)\n", filename, dataSize);
 }
 
-// Save IR thermal image as BMP file
-// IR thermal: 16x12 pixels (192 values, typically 0-655 representing temperature)
+// Save IR thermal image as raw binary
+// IR thermal: 16x12 pixels (192 pixels * 2 bytes = 384 bytes)
 void saveIRImage(uint16_t* irFrame, uint32_t timestamp) {
   if (irFrame == nullptr) {
     Serial.println("[IR] No frame data to save");
@@ -297,11 +268,12 @@ void saveIRImage(uint16_t* irFrame, uint32_t timestamp) {
   
   // Create filename with timestamp
   char filename[64];
-  snprintf(filename, sizeof(filename), "%s/thermal_camera/%u.bmp", sessionFolder.c_str(), timestamp);
+  snprintf(filename, sizeof(filename), "%s/thermal_camera/%u.ir16", sessionFolder.c_str(), timestamp);
   
   // IR thermal image: 16x12 pixels
   const uint16_t width = 16;
   const uint16_t height = 12;
+  uint32_t dataSize = width * height * 2;  // 384 bytes (raw uint16_t)
   
   File file = SD.open(filename, FILE_WRITE);
   if (!file) {
@@ -309,58 +281,9 @@ void saveIRImage(uint16_t* irFrame, uint32_t timestamp) {
     return;
   }
   
-  // Convert IR thermal data (16-bit values) to grayscale 8-bit for BMP
-  // IR values typically range from 0-655, we'll map to 0-255
-  uint8_t* grayscaleData = new uint8_t[width * height];
+  // Write raw IR thermal data (no conversion, no header)
+  file.write((uint8_t*)irFrame, dataSize);
   
-  for (int i = 0; i < width * height; i++) {
-    // Map IR value (0-655) to grayscale (0-255)
-    uint16_t irValue = irFrame[i];
-    grayscaleData[i] = (uint8_t)((irValue * 255) / 655);
-  }
-  
-  // BMP Header for 8-bit grayscale
-  uint8_t bmpHeader[54];
-  uint32_t fileSize = 54 + 256*4 + (width * height);  // Header + Palette + Image
-  uint32_t pixelDataOffset = 54 + 256*4;
-  uint16_t bitsPerPixel = 8;
-  
-  // BMP File Header (14 bytes)
-  bmpHeader[0] = 'B';
-  bmpHeader[1] = 'M';
-  *(uint32_t*)&bmpHeader[2] = fileSize;
-  *(uint16_t*)&bmpHeader[6] = 0;
-  *(uint16_t*)&bmpHeader[8] = 0;
-  *(uint32_t*)&bmpHeader[10] = pixelDataOffset;
-  
-  // BMP Info Header (40 bytes)
-  *(uint32_t*)&bmpHeader[14] = 40;
-  *(int32_t*)&bmpHeader[18] = width;
-  *(int32_t*)&bmpHeader[22] = height;
-  *(uint16_t*)&bmpHeader[26] = 1;
-  *(uint16_t*)&bmpHeader[28] = bitsPerPixel;
-  *(uint32_t*)&bmpHeader[30] = 0;
-  *(uint32_t*)&bmpHeader[34] = 0;
-  *(int32_t*)&bmpHeader[38] = 2835;
-  *(int32_t*)&bmpHeader[42] = 2835;
-  *(uint32_t*)&bmpHeader[46] = 256;  // Color table entries
-  *(uint32_t*)&bmpHeader[50] = 0;
-  
-  // Write header
-  file.write(bmpHeader, 54);
-  
-  // Write grayscale palette (256 entries, each 4 bytes: B,G,R,A)
-  for (int i = 0; i < 256; i++) {
-    file.write(i);    // B
-    file.write(i);    // G
-    file.write(i);    // R
-    file.write(0);    // A (reserved)
-  }
-  
-  // Write image data
-  file.write(grayscaleData, width * height);
-  
-  delete[] grayscaleData;
   file.close();
-  Serial.printf("[IR] Thermal image saved: %s (%u bytes)\n", filename, fileSize);
+  Serial.printf("[IR] Image saved: %s (%u bytes)\n", filename, dataSize);
 }
