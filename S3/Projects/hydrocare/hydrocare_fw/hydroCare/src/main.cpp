@@ -12,13 +12,15 @@ bool deviceStatus = false; // false = stopped, true = logging
 
 // Buffer for downsampled 16x16 RGB565 frame (256 pixels * 2 bytes = 512 bytes)
 uint16_t downsampled16x16[256];  // Shared with BLE for transmission
+// Buffer for IR thermal frame 16x12 (192 pixels * 2 bytes = 384 bytes)
+uint16_t irFrame16x12[192];      // Shared with BLE for transmission
 
 void setup() {
   initPins();
   initPeripherals();
   initLed();
   initSD();
-  initSessionFolder();  // Create timestamped folder structure
+  // Session folder will be created when BLE connection starts logging
   uiInit();
   initmmWave();
   initBLE();
@@ -28,7 +30,8 @@ void setup() {
   
   Serial.println("\n=== HYDROCARE MASTER - SPI SENSOR ACQUISITION ===");
   Serial.println("Reading sensor data from slave via SPI protocol");
-  Serial.println("SPI Clock: 10 MHz, Buffer: 20k bytes\n");
+  Serial.println("SPI Clock: 10 MHz, Buffer: 20k bytes");
+  Serial.println("Waiting for BLE connection to start logging...\n");
 }
 
 void loop() {
@@ -39,66 +42,106 @@ void loop() {
     connectToWiFi();
     performOTAUpdate();
   }
-  
-  // TODO: Process BLE tasks with down-sampled 16x16 image (4x4 pixel averaging from 64x64)
-  // processBLETasks();  // Disabled for now - will update with averaged RGB565 image
-  
   if (deviceConnected && timerStream == 1 && deviceStatus == 1) {
-
-    String dataRow;
+    uint32_t loopCycleStart = millis();
+    uint32_t startTime, duration;
+    
+    Serial.println("\n========== MAIN LOOP CYCLE START ==========");
     
     // Measure all local sensors
+    startTime = millis();
     measureBatteryLevel();
+    duration = millis() - startTime;
+    Serial.printf("[TIMER] measureBatteryLevel: %u ms\n", duration);
+    
+    startTime = millis();
     measureAmbLight();
+    duration = millis() - startTime;
+    Serial.printf("[TIMER] measureAmbLight: %u ms\n", duration);
+    
+    startTime = millis();
     measurePIR();
+    duration = millis() - startTime;
+    Serial.printf("[TIMER] measurePIR: %u ms\n", duration);
+    
+    startTime = millis();
     measuremmWave();
+    duration = millis() - startTime;
+    Serial.printf("[TIMER] measuremmWave: %u ms\n", duration);
     
-    uint32_t loopStartTime = millis();
-    
-    // Fetch fresh data and assign it to our pointer
+    // Fetch fresh data from slave
+    startTime = millis();
     SensorDataPacket* slaveData = readSlaveData(); 
+    duration = millis() - startTime;
+    Serial.printf("[TIMER] readSlaveData: %u ms\n", duration);
     
-    uint32_t loopDuration = millis() - loopStartTime;
-    Serial.printf("\n[Master] SLAVE sensor READ completed in %u ms\n", loopDuration);
+    uint32_t currentTimestamp = millis();
     
     // Update internal ambient light from slave data
     if (slaveData != nullptr) {
       ambLight_Int = slaveData->ambientLight;
     }
     
-    // Build data row with local and slave measurements
-    dataRow = String(millis()) + "," +
-              String(batteryPercentage) + "," +
-              String(ambLight) + "," +
-              String(PIRValue) + "," +
-              String(movingDist) + "," +
-              String(movingEnergy) + "," +
-              String(staticDist) + "," +
-              String(staticEnergy) + "," +
-              String(detectionDist) + "," +
-              String(ambLight_Int);
+    // ==================== LOG SENSOR DATA ====================
+    startTime = millis();
+    logSensorData(currentTimestamp, 
+                  batteryPercentage,
+                  ambLight,
+                  PIRValue,
+                  movingDist,
+                  movingEnergy,
+                  staticDist,
+                  staticEnergy,
+                  detectionDist,
+                  ambLight_Int,
+                  slaveData != nullptr ? slaveData->humidity : 0.0f,
+                  slaveData != nullptr ? slaveData->temperature : 0.0f);
+    duration = millis() - startTime;
+    Serial.printf("[TIMER] logSensorData: %u ms\n", duration);
     
-    logData(dataRow);
-    
-    // Log microphone and accelerometer samples if available
+    // ==================== LOG MIC & ACCEL SAMPLES ====================
     if (slaveData != nullptr) {
+      startTime = millis();
       logMicAccelSamples(slaveData->accelX_samples, slaveData->accelY_samples, 
                          slaveData->accelZ_samples, slaveData->microphoneSamples, 
                          slaveData->accelSampleCount);
+      duration = millis() - startTime;
+      Serial.printf("[TIMER] logMicAccelSamples: %u ms\n", duration);
     }
     
-    // Downsample 64x64 RGB frame to 16x16 for BLE transmission (4x4 pixel averaging)
-    uint16_t* rgbFrame = getLastRGBFrame();
-    if (rgbFrame != nullptr) {
-      downsampleRGBFrame(rgbFrame, downsampled16x16);
-      Serial.println("[BLE] Downsampled RGB 64x64 -> 16x16 (ready for transmission)");
+    // ==================== SAVE COLOR CAMERA (RGB565) ====================
+    if (slaveData != nullptr) {
+      startTime = millis();
+      saveRGBImage(slaveData->rgbFrame, currentTimestamp);
+      duration = millis() - startTime;
+      Serial.printf("[TIMER] saveRGBImage: %u ms\n", duration);
+      
+      // Downsample 64x64 RGB frame to 16x16 for BLE transmission
+      downsampleRGBFrame(slaveData->rgbFrame, downsampled16x16);
     }
     
-    // Send all notifications (includes downsampled images)
+    // ==================== SAVE THERMAL CAMERA (IR) ====================
+    if (slaveData != nullptr) {
+      startTime = millis();
+      saveIRImage(slaveData->irFrame, currentTimestamp);
+      duration = millis() - startTime;
+      Serial.printf("[TIMER] saveIRImage: %u ms\n", duration);
+      
+      // Copy 16x12 IR frame for BLE transmission
+      memcpy(irFrame16x12, slaveData->irFrame, sizeof(irFrame16x12));
+    }
+    
+    // ==================== SEND BLE NOTIFICATIONS ====================
+    startTime = millis();
     notifyAll();
+    duration = millis() - startTime;
+    Serial.printf("[TIMER] notifyAll (BLE): %u ms\n", duration);
+    
+    // Print total loop cycle time
+    uint32_t totalCycleDuration = millis() - loopCycleStart;
+    Serial.printf("[TIMER] TOTAL LOOP CYCLE: %u ms\n", totalCycleDuration);
+    Serial.println("========== MAIN LOOP CYCLE END ==========\n");
     
     timerStream = 0;
-
-    
   }
 }

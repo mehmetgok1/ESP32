@@ -194,7 +194,7 @@ SensorDataPacket* readSlaveData() {
   // ========== STEP 1: Set Trigger ==========
   Serial.println("[Master] Step 1: Writing TRIGGER to control register...");
   spiWrite(ADDR_CTRL, CTRL_TRIGGER_MEASUREMENT);
-  delay(50);
+  delay(10);
   
   // ========== STEP 2: Poll for MEASURED status ==========
   Serial.println("[Master] Step 2: Polling for measurement complete...");
@@ -209,8 +209,8 @@ SensorDataPacket* readSlaveData() {
       measured = true;
       break;
     }
-    Serial.printf("  Polling... status: 0x%02X\n", status);
-    delay(50);
+    //Serial.printf("  Polling... status: 0x%02X\n", status);
+    delay(30);
   }
   
   if (!measured) {
@@ -221,7 +221,7 @@ SensorDataPacket* readSlaveData() {
   // ========== STEP 3: Set Lock ==========
   Serial.println("[Master] Step 3: Writing LOCK to control register...");
   spiWrite(ADDR_CTRL, CTRL_LOCK_BUFFERS);
-  delay(50);
+  delay(10);
   
   // ========== STEP 4: Poll for LOCKED status ==========
   Serial.println("[Master] Step 4: Polling for buffers locked...");
@@ -235,8 +235,8 @@ SensorDataPacket* readSlaveData() {
       locked = true;
       break;
     }
-    Serial.printf("  Polling... status: 0x%02X\n", status);
-    delay(50);
+    //Serial.printf("  Polling... status: 0x%02X\n", status);
+    delay(5);
   }
   
   if (!locked) {
@@ -348,22 +348,7 @@ void sendBrightness(uint8_t brightness) {
   spiWrite(ADDR_BRIGHTNESS, brightness);
 }
 
-// Expose the RGB frame for BLE transmission
-uint16_t* getLastRGBFrame() {
-  if (spiRxBuffer) {
-    SensorDataPacket *packet = (SensorDataPacket*)(spiRxBuffer);
-    return packet->rgbFrame;
-  }
-  return nullptr;
-}
 
-uint16_t* getLastIRFrame() {
-  if (spiRxBuffer) {
-    SensorDataPacket *packet = (SensorDataPacket*)(spiRxBuffer);
-    return packet->irFrame;
-  }
-  return nullptr;
-}
 
 // Downsample 64x64 RGB565 frame to 16x16 by averaging 4x4 pixel blocks
 // Input: rgbFrame64x64 (4096 pixels = 64x64)

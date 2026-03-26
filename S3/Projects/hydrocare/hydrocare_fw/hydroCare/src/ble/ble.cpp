@@ -16,6 +16,7 @@ bool sendIrFlag = false;
 
 // External buffers from main.cpp and communication functions
 extern uint16_t downsampled16x16[256];  // 16x16 downsampled RGB frame
+extern uint16_t irFrame16x12[192];      // 16x12 IR thermal frame
 
 // Characteristic Pointers
 NimBLECharacteristic *pBatChar, *pLuxChar, *pPirChar, *pMmwaveChar, *pActionChar, *pVerChar, *pAmbIntChar;
@@ -82,14 +83,14 @@ class ActionCallbacks: public NimBLECharacteristicCallbacks {
                 }
 
                 deviceStatus = 1;
-                Serial.print("[SD] Target Filename: ");
-                Serial.println(label);
+                Serial.println("\n[BLE] Logging started - Creating new session folder...");
                 
-                // Use new timestamped sensor data path structure
-                currentFileName = getSensorDataPath();
-                Serial.println("[SD] Using sensor data path: " + currentFileName);
-                openFileAndHeader("Timestamp,Batt,ambLight,PIR,mD,mE,sD,sE,distance,ambLight_Int");
-                openMicAccelFile();  // Initialize mic&accel CSV
+                // Create a new session folder for this BLE connection
+                initSessionFolder();
+                openMicAccelFile();   // Initialize mic&accel CSV with header
+                initSensorDataFile(); // Initialize sensor data CSV with header
+                
+                Serial.println("[BLE] Session files ready for logging");
             }
             // --- STOP PARSER ---
             else if(command.startsWith("Com;Stop")){
@@ -240,29 +241,26 @@ void sendDownsampledImages() {
     
     // Send 16x12 IR frame (192 pixels * 2 bytes = 384 bytes)
     if (pIrChar != nullptr) {
-        uint16_t* irFrame = getLastIRFrame();
-        if (irFrame != nullptr) {
-            uint8_t* ptr = (uint8_t*)irFrame;
-            int remaining = 384;  // 16x12 pixels * 2 bytes
-            int offset = 0;
+        uint8_t* ptr = (uint8_t*)irFrame16x12;
+        int remaining = 384;  // 16x12 pixels * 2 bytes
+        int offset = 0;
+        
+        Serial.println("[BLE] Sending 16x12 IR frame...");
+        
+        while (remaining > 0) {
+            int chunkSize = remaining > 200 ? 200 : remaining;
+            uint8_t payload[202];
             
-            Serial.println("[BLE] Sending 16x12 IR frame...");
+            payload[0] = offset & 0xFF;
+            payload[1] = (offset >> 8) & 0xFF;
+            memcpy(&payload[2], ptr + offset, chunkSize);
             
-            while (remaining > 0) {
-                int chunkSize = remaining > 200 ? 200 : remaining;
-                uint8_t payload[202];
-                
-                payload[0] = offset & 0xFF;
-                payload[1] = (offset >> 8) & 0xFF;
-                memcpy(&payload[2], ptr + offset, chunkSize);
-                
-                pIrChar->setValue(payload, chunkSize + 2);
-                pIrChar->notify();
-                
-                offset += chunkSize;
-                remaining -= chunkSize;
-                delay(5);  // Small delay between chunks
-            }
+            pIrChar->setValue(payload, chunkSize + 2);
+            pIrChar->notify();
+            
+            offset += chunkSize;
+            remaining -= chunkSize;
+            delay(5);  // Small delay between chunks
         }
     }
     
@@ -293,61 +291,4 @@ void notifyAll() {
     
     // 5. Send downsampled 16x16 RGB and 16x12 IR frames every 1 second
     sendDownsampledImages();
-}
-
-// Process pending BLE actions like sending RGB frames (call from main loop)
-void processBLETasks() {
-    if (sendRgbFlag || sendIrFlag) {
-        if (sendRgbFlag) {
-            sendRgbFlag = false;
-            uint16_t* frame = getLastRGBFrame();
-            if (frame && deviceConnected && pRgbChar != nullptr) {
-                Serial.println("[BLE] Sending 64x64 RGB Frame...");
-                uint8_t* ptr = (uint8_t*)frame;
-                int remaining = 8192; // 64x64 pixels * 2 bytes
-                int offset = 0;
-                
-                while (remaining > 0) {
-                    int chunkSize = remaining > 200 ? 200 : remaining;
-                    uint8_t payload[202]; 
-                    
-                    payload[0] = offset & 0xFF;         
-                    payload[1] = (offset >> 8) & 0xFF;  
-                    memcpy(&payload[2], ptr + offset, chunkSize);
-                    
-                    pRgbChar->setValue(payload, chunkSize + 2);
-                    pRgbChar->notify();
-                    
-                    offset += chunkSize;
-                    remaining -= chunkSize;
-                    delay(15);
-                }
-                Serial.println("[BLE] RGB Frame transmission complete!");
-            }
-        }
-        if (sendIrFlag) {
-            sendIrFlag = false;
-            uint16_t* irFrame = getLastIRFrame();
-            if (irFrame && deviceConnected && pIrChar != nullptr) {
-                Serial.println("[BLE] Sending 16x12 IR Frame...");
-                uint8_t* ptr = (uint8_t*)irFrame;
-                int remaining = 384; // 16x12 pixels * 2 bytes
-                int offset = 0;
-                while (remaining > 0) {
-                    int chunkSize = remaining > 200 ? 200 : remaining;
-                    uint8_t payload[202];
-                    payload[0] = offset & 0xFF;
-                    payload[1] = (offset >> 8) & 0xFF;
-                    memcpy(&payload[2], ptr + offset, chunkSize);
-                    pIrChar->setValue(payload, chunkSize + 2);
-                    pIrChar->notify();
-                    
-                    offset += chunkSize;
-                    remaining -= chunkSize;
-                    delay(15);
-                }
-                Serial.println("[BLE] IR Frame transmission complete!");
-            }
-        }
-    }
 }

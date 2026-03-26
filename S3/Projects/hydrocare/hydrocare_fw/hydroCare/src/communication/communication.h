@@ -80,8 +80,7 @@ void spiReadBulk(uint8_t address, uint8_t *buffer, uint16_t numBytes);
 SensorDataPacket* readSlaveData();
 void sendIRLED(bool state);
 void sendBrightness(uint8_t brightness);
-uint16_t* getLastRGBFrame();
-uint16_t* getLastIRFrame();
+
 uint16_t* downsampleRGBFrame(uint16_t* rgbFrame64x64, uint16_t* outFrame16x16);
 
 #endif

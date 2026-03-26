@@ -6,7 +6,6 @@
 #define EEPROM_SIZE       1        // Size in bytes
 #define deviceRoleAddress 0        // Address to read/write
 
-extern String currentFileName;
 extern String sessionFolder;      // Root session folder (e.g., /20260325_143022/)
 
 void initEEPROM();
@@ -21,8 +20,11 @@ String getThermalCameraPath();     // Get path for thermal camera folder
 String getMicAccelPath();          // Get path for mic&accel CSV
 void logMicAccelSamples(int16_t* accelX, int16_t* accelY, int16_t* accelZ, uint16_t* mic, uint16_t sampleCount);
 void logData(String data);
-void openFileAndHeader(String header);
-void openMicAccelFile();      // Initialize mic&accel CSV with header
-void setFileName(String name);
+void logSensorData(uint32_t timestamp, float batteryPct, float ambLight, float pir, float mmWaveDist, float mmWaveEnergy, 
+                   float staticDist, float staticEnergy, float detectionDist, float ambLight_slave, float humidity, float temperature);
+void openMicAccelFile();           // Initialize mic&accel CSV with header
+void initSensorDataFile();         // Initialize sensor data CSV with header
+void saveRGBImage(uint16_t* rgbFrame, uint32_t timestamp);  // Save RGB565 as BMP
+void saveIRImage(uint16_t* irFrame, uint32_t timestamp);    // Save IR thermal as BMP
 
 #endif
