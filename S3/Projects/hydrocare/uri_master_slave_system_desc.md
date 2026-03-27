@@ -550,3 +550,219 @@ Already in °C:  19.5°C (no conversion needed)
 - ✅ **Real-time:** BLE notifications with downsampled frames
 
 All sensor data converges into **CombinedDataPacket (~24.6 KB)** every second, logged to SD card and streamed via BLE.
+
+---
+
+## Post-Processing: Binary to CSV/PNG Conversion
+
+### Overview
+
+The binary `.bin` files on SD card are compact but not human-readable. A **Python post-processing script** converts them into accessible formats:
+
+**Input:** Session folder with part files
+```
+/YYYYMMDD_HHMMSS/
+├── YYYYMMDD_HHMMSS_part_0.bin
+├── YYYYMMDD_HHMMSS_part_50.bin
+├── YYYYMMDD_HHMMSS_part_100.bin
+└── ...
+```
+
+**Output:** Organized data folders
+```
+processed_YYYYMMDD_HHMMSS/
+├── sensors/
+│   └── combined_data.csv          ← All master + slave sensor readings
+├── accel/
+│   ├── accelX.csv, accelY.csv, accelZ.csv  ← 2000 samples per packet
+│   └── timestamps.csv
+├── audio/
+│   ├── microphone_samples.csv     ← 2000 audio samples per packet
+│   └── timestamps.csv
+├── thermal/
+│   ├── ir_heatmaps/
+│   │   ├── ir_packet_0.csv        ← 16×12 thermal grid per packet
+│   │   ├── ir_packet_1.csv        ← Temperatures in °C (converted from uint16)
+│   │   └── ...
+│   └── ir_summary.csv             ← Min/max/avg temps per packet
+├── rgb/
+│   ├── downsampled_frames/
+│   │   ├── rgb_packet_0.png       ← 64×64 RGB image
+│   │   ├── rgb_packet_1.png
+│   │   └── ...
+│   └── rgb_summary.csv
+└── metadata/
+    └── session_info.txt           ← Start time, duration, packet count, etc.
+```
+
+### Python Script Usage
+
+**Simple invocation (only requires path):**
+```bash
+python uri_bin_extracter.py /path/to/session/folder
+```
+
+**Example:**
+```bash
+python uri_bin_extracter.py /home/user/hydrocare/SD_content/20260328_145322
+```
+
+The script automatically:
+1. ✅ Finds all `part_*.bin` files in the folder
+2. ✅ Reads binary structs (CombinedDataPacket)
+3. ✅ Parses all sensor data
+4. ✅ Converts temperature data (IR from uint16_t → °C)
+5. ✅ Generates CSV files (accelerometer, microphone, summary)
+6. ✅ Generates PNG images (RGB frames, heatmaps)
+7. ✅ Organizes into intuitive folder structure
+
+### Data Conversion Details
+
+#### Accelerometer (int16_t samples)
+```python
+# Already in mG (milligravity) * 1000
+accel_g = sample / 1000.0
+```
+
+#### Microphone (uint16_t samples)
+```python
+# Raw ADC value, application-dependent scaling
+microphone_raw = sample
+```
+
+#### Temperature - IR Thermal (uint16_t fixed-point) **[IMPORTANT]**
+```python
+# Data stored as: (actual_temp + 40) * 100
+# Example: 21.5°C stored as (21.5 + 40) * 100 = 6150
+
+# Conversion:
+temp_celsius = (raw_uint16 / 100.0) - 40
+
+# Example conversion:
+raw = 6150
+temp_c = (6150 / 100.0) - 40  # = 21.5°C
+```
+
+The script automatically applies this conversion when generating CSV/PNG outputs.
+
+#### Average Temperature (float)
+```python
+# Already in °C, no conversion needed
+temp_avg = temperature_float_field
+```
+
+#### RGB Frame (uint16_t RGB565)
+```python
+# Each pixel stored as 16-bit RGB565 (5 red bits, 6 green bits, 5 blue bits)
+# Script converts to RGB888 (8 bits per channel) for PNG output
+pixel_16bit = rgb_sample
+r8 = ((pixel_16bit >> 11) & 0x1F) * 255 // 31
+g8 = ((pixel_16bit >> 5) & 0x3F) * 255 // 63
+b8 = (pixel_16bit & 0x1F) * 255 // 31
+```
+
+### CSV Output Formats
+
+#### combined_sensors.csv
+```
+timestamp_ms,sequence,battery_v,battery_pct,ambient_light,pir_value,mmwave_dist,temp_avg_c,humidity_pct,accel_x_mg,accel_y_mg,accel_z_mg
+1234567,1,4.15,87.3,156,0.45,245,21.3,45.2,0,0,-980
+1235567,2,4.14,87.1,158,0.42,244,21.4,45.3,5,-10,-975
+...
+```
+
+#### accelX.csv (per-packet high-speed samples)
+```
+packet,sample_0,sample_1,sample_2,...,sample_1999
+0,-5,0,10,15,...,20
+1,-8,5,12,18,...,25
+...
+```
+
+#### ir_heatmap_0.csv (16×12 thermal grid, converted to °C)
+```
+row,col_0,col_1,col_2,...,col_15
+0,21.2,21.5,21.8,...,22.1
+1,20.9,21.1,21.6,...,22.0
+...
+11,20.5,20.7,21.2,...,21.8
+```
+
+All temperatures are **already converted from fixed-point to °C**.
+
+### PNG Output Formats
+
+#### RGB Frames (rgb_packet_N.png)
+- **Size:** 64×64 pixels
+- **Format:** RGB PNG (8 bits per channel)
+- **Conversion:** RGB565 → RGB888 automatically
+- **Naming:** Matches packet order
+
+#### IR Heatmaps (ir_heatmap_N.png)
+- **Size:** 16×12 pixels
+- **Format:** Grayscale or false-color heatmap
+- **Scale:** Temperature range (typically 15-40°C)
+- **Conversion:** uint16_t fixed-point → temperature → color
+
+### Script Features
+
+```python
+# Pseudocode example
+for bin_file in sorted(part_files):
+    with open(bin_file, 'rb') as f:
+        while True:
+            packet_bytes = f.read(sizeof(CombinedDataPacket))
+            if not packet_bytes:
+                break
+            
+            # Unpack binary struct
+            packet = struct.unpack('<packet_format>', packet_bytes)
+            
+            # Convert temperatures
+            ir_temps = [(raw / 100.0) - 40 for raw in ir_frame]
+            
+            # Generate outputs
+            save_csv_row(combined_data_csv, packet)
+            save_accel_samples(accel_csv, packet.accelX_samples)
+            save_ir_heatmap_png(f'ir_packet_{packet_num}.png', ir_temps)
+            save_rgb_frame_png(f'rgb_packet_{packet_num}.png', packet.rgbFrame)
+            
+            packet_num += 1
+```
+
+### Requirements
+
+```
+Python 3.7+
+numpy        (array processing)
+pandas       (CSV generation)
+PIL/Pillow   (PNG generation)
+struct       (binary unpacking, built-in)
+```
+
+Install:
+```bash
+pip install numpy pandas pillow
+```
+
+### Example Workflow
+
+```bash
+# 1. Extract data from SD card to computer
+cp -r /media/usb/20260328_145322 ~/hydrocare_data/
+
+# 2. Run conversion
+python uri_bin_extracter.py ~/hydrocare_data/20260328_145322
+
+# 3. Results:
+# ~/hydrocare_data/processed_20260328_145322/
+#   ├── sensors/combined_data.csv
+#   ├── accel/accelX.csv
+#   ├── thermal/ir_heatmaps/*.png
+#   └── rgb/*.png
+
+# 4. Open CSV in Excel, view images in image viewer
+```
+
+This approach makes **raw binary data immediately accessible** for analysis, visualization, and post-processing without proprietary tools. ✅
+
