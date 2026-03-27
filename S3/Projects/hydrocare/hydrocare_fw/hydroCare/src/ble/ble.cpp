@@ -92,10 +92,9 @@ class ActionCallbacks: public NimBLECharacteristicCallbacks {
                 
                 // Create a new session folder for this BLE connection
                 initSessionFolder();
-                openMicAccelFile();   // Initialize mic&accel CSV with header
-                initSensorDataFile(); // Initialize sensor data CSV with header
-                openRGBSessionFile(); // Open persistent RGB stream file
-                openIRSessionFile();  // Open persistent IR stream file
+                // openMicAccelFile();   // DISABLED - SD task now handles append-based logging
+                // initSensorDataFile(); // DISABLED - SD task now handles append-based logging
+                // NOTE: RGB and IR are written per-packet in SD task, sensor/accel append to single files
                 
                 sessionInitialized = true;  // NOW safe to log
                 Serial.println("[BLE] Session files ready for logging");
@@ -104,8 +103,8 @@ class ActionCallbacks: public NimBLECharacteristicCallbacks {
             else if(command.startsWith("Com;Stop")){
                 deviceStatus = 0;
                 sessionInitialized = false;  // Reset for next session
-                closeSessionFiles();  // Close persistent RGB/IR files
-                Serial.println("[SD] Stop Logging. Session files closed.");
+                // RGB/IR files are already closed by SD task after each write
+                Serial.println("[SD] Stop Logging. Session ended.");
             }
             // --- CONTROL PARSER ---
             else if (command.startsWith("Com;Control")) {

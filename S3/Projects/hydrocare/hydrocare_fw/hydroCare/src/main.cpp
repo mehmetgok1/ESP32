@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <SD.h>
 #include "config/config.h"
 #include "ui/ui.h"
 #include "measurement/measurement.h"
@@ -18,7 +19,7 @@ uint16_t irFrame16x12[192];      // Shared with BLE for transmission
 
 // FreeRTOS Queue for sensor data (non-blocking SD logging)
 QueueHandle_t sensorDataQueue = NULL;
-const int SENSOR_QUEUE_SIZE = 3;  // Buffer up to 3 packets
+const int SENSOR_QUEUE_SIZE = 3;  // Buffer up to 3 packets (3 seconds of data)
 
 // ==================== COMBINED DATA PACKET ====================
 // Includes both master sensor readings and slave sensor data
@@ -41,34 +42,63 @@ typedef struct {
 } CombinedDataPacket;
 #pragma pack()
 
-// SD Card logging task (runs independently from main loop)
+// SD Card logging task - BINARY APPROACH with 50-packet file rotation
+// Creates new binary file every 50 packets (e.g., part_0.bin, part_50.bin, part_100.bin)
 void sdCardLoggingTask(void *parameter) {
   static CombinedDataPacket packet;  // Static allocation - not on stack
   uint32_t packetsLogged = 0;
   
-  Serial.println("[SD-TASK] SD logging task started (independent, ready to queue packets)");
+  Serial.println("[SD-TASK] SD logging task started (BINARY mode - high speed, 50-packet rotation)");
   
   while(1) {
     // Wait for packet from main loop (blocks if queue empty)
     if (xQueueReceive(sensorDataQueue, &packet, portMAX_DELAY)) {
+      uint32_t taskStart = millis();  // Start timing this packet
+      
       // Validate packet before logging
       if (packet.slaveData.sequence == 0 || packet.slaveData.temperature == 0.0) {
-        Serial.printf("[SD-TASK] Dropped invalid packet (seq=%u, temp=%.1f)\n", 
+        Serial.printf("[SD-TASK-ERR] Dropped invalid packet (seq=%u, temp=%.1f)\n", 
                      packet.slaveData.sequence, packet.slaveData.temperature);
         continue;  // Skip this packet
       }
       
-      // LOGGING OPERATIONS (non-blocking from main loop perspective)
-      // Now includes both master and slave data:
-      // - logSensorData(&packet) with battery, light, PIR, mmWave
-      // - logMicAccelSamples(&packet.slaveData)
-      // - saveRGBImage(&packet.slaveData)
-      // - saveIRImage(&packet.slaveData)
+      // Calculate which part file to use (every 50 packets = new file)
+      uint32_t fileIndex = (packetsLogged / 50) * 50;
+      char dataFile[128];
+      snprintf(dataFile, sizeof(dataFile), "/%s/%s_part_%u.bin", sessionFolder.c_str(), sessionFolder.c_str(), fileIndex);
+      
+      // Open file with FILE_APPEND (creates file if doesn't exist, appends if exists)
+      File df = SD.open(dataFile, FILE_APPEND);
+      if (!df) {
+        Serial.printf("[SD-TASK-WARN] FILE_APPEND failed, attempting FILE_WRITE create for: %s\n", dataFile);
+        df = SD.open(dataFile, FILE_WRITE);
+        if (!df) {
+          Serial.printf("[SD-TASK-ERR] Failed to create binary file: %s\n", dataFile);
+          continue;
+        }
+      }
+      
+      // CRITICAL OPTIMIZATION: Write entire struct as binary (NO printf, NO loops, NO conversions)
+      // This is ~100x faster than CSV approach
+      uint32_t writeStart = micros();  // Microsecond precision for SD timing
+      size_t written = df.write((const uint8_t*)&packet, sizeof(CombinedDataPacket));
+      uint32_t writeTime = micros() - writeStart;
+      
+      uint32_t closeStart = micros();
+      df.close();  // Close after every packet ensures data durability
+      uint32_t closeTime = micros() - closeStart;
+      
+      if (written != sizeof(CombinedDataPacket)) {
+        Serial.printf("[SD-TASK-ERR] Incomplete write! Expected %d bytes, wrote %d bytes\n", 
+                     sizeof(CombinedDataPacket), written);
+      }
       
       packetsLogged++;
-      if (packetsLogged % 10 == 0) {
-        Serial.printf("[SD-TASK] Logged %u packets to SD\n", packetsLogged);
-      }
+      uint32_t taskDuration = millis() - taskStart;
+      
+      // Print detailed timing on every packet (with microsecond precision)
+      Serial.printf("[SD-TASK] Packet #%u | Write: %u µs | Close: %u µs | Total: %u ms\n",
+                   packetsLogged, writeTime, closeTime, taskDuration);
     }
   }
 }
@@ -94,11 +124,11 @@ void setup() {
     Serial.printf("[QUEUE] Created combined data queue (max %d packets)\n", SENSOR_QUEUE_SIZE);
   }
   
-  // Create SD logging task (lower priority, gets 4KB stack)
+  // Create SD logging task (lower priority, gets 16KB stack - sufficient for CombinedDataPacket)
   xTaskCreatePinnedToCore(
     sdCardLoggingTask,      // Task function
     "SDLoggingTask",        // Task name
-    4096,                   // Stack size (bytes)
+    16384,                  // Stack size (16KB - CombinedDataPacket is ~15KB)
     NULL,                   // Parameter
     1,                      // Priority (lower than main)
     NULL,                   // Task handle
@@ -156,8 +186,7 @@ void loop() {
       if (xQueueSend(sensorDataQueue, (void *)&combinedPacket, 0) == pdTRUE) {
         Serial.printf("[QUEUE] Combined packet queued\n");
       } else {
-        Serial.println("[QUEUE] WARNING: Queue full, overwriting");
-        xQueueOverwrite(sensorDataQueue, (void *)&combinedPacket);
+        Serial.println("[QUEUE] WARNING: Queue full, packet dropped");
       }
     }
     

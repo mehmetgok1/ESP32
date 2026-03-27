@@ -12,3 +12,4 @@
 # System files
 .DS_Store
 Thumbs.db
+hydrocare_sensor/**.md
