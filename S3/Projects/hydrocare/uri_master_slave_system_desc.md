@@ -45,34 +45,86 @@ GND           ←→   GND            (Common ground)
 
 ### Packet Structure (Byte Level)
 
-**Master sends 3-byte command, Slave responds simultaneously.**
+**Master sends bytes, Slave responds simultaneously on MISO line.**
 
-#### Single-Byte Read (2 bytes total)
-```
-Master TX:  [R/W=1 | ADDR]  [0x00]
-Slave TX:   [DUMMY      ]   [DATA]
-            ↑                ↑
-            Discarded       Received by master
-```
-Master reads data at byte 1.
+#### Single-Byte Read (2 bytes total) - Master wants to READ from Slave
 
-#### Single-Byte Write (3 bytes total)
 ```
-Master TX:  [R/W=0 | ADDR]  [0x00]  [DATA]
-Slave TX:   [DUMMY      ]   [STATUS][ACK]
-            ↑                ↑
-            Discarded       Discarded
-Slave processes write after CS goes HIGH.
+Byte 0 (Command):
+  Master TX:  [R/W=1 | ADDR]        (read command with address)
+  Slave TX:   [DUMMY]               (not used)
+  Master uses: IGNORES              (reads only for timing)
+  
+Byte 1 (Data):
+  Master TX:  [0x00]                (clock pulse)
+  Slave TX:   [DATA]                (actual data from slave)
+  Master uses: READS & USES         (this is the value we want)
 ```
 
-#### Bulk Read - 25.6 KB Sensor Packet
+**Example: Master reads STATUS byte**
+```c
+uint8_t status = spiRead(ADDR_STATUS);
+// Returns: slave's current status (from byte 1 response)
 ```
-Master TX:  [R/W=1 | ADDR]  [0x00]  [0x00] × 25598 bytes (DMA stream)
-Slave TX:   [DUMMY      ]   [STATUS][SENSOR DATA (25596 bytes)]
-            ↑                ↑
-            Discarded       Received
+
+---
+
+#### Single-Byte Write (3 bytes total) - Master wants to WRITE to Slave
+
 ```
-Master reads full packet as DMA transfer in one blocking call.
+Byte 0 (Command):
+  Master TX:  [R/W=0 | ADDR]        (write command with address)
+  Slave TX:   [DUMMY]               (not used)
+  Master uses: IGNORES
+  
+Byte 1 (Padding):
+  Master TX:  [0x00]                (padding byte)
+  Slave TX:   [STATUS]              (slave's status)
+  Master uses: IGNORES
+  
+Byte 2 (Data):
+  Master TX:  [DATA]                (data master wants to write)
+  Slave TX:   [ACK]                 (not used)
+  Master uses: IGNORES
+  
+SLAVE PROCESSING: After CS goes HIGH, slave reads the DATA from byte 2 and processes
+```
+
+**Example: Master triggers measurement**
+```c
+spiWrite(ADDR_CTRL, CTRL_TRIGGER_MEASUREMENT);
+// Slave reads byte 2 and executes the trigger
+```
+
+---
+
+#### Bulk Read - 25.6 KB Sensor Packet (25,602 bytes total)
+
+```
+Byte 0 (Command):
+  Master TX:  [R/W=1 | ADDR]               (read command)
+  Slave TX:   [DUMMY]                      (not used)
+  Master uses: IGNORES
+  
+Byte 1 (Status):
+  Master TX:  [0x00]                       (clock pulse)
+  Slave TX:   [STATUS]                     (slave status byte)
+  Master uses: IGNORES (or optionally checks)
+  
+Bytes 2-25,601 (Data Stream - DMA):
+  Master TX:  [0x00] × 25,600 bytes        (clock stream via DMA)
+  Slave TX:   [SENSOR DATA] × 25,600 bytes (txBuf contents via DMA)
+  Master uses: READS & USES ALL            (entire sensor packet captured)
+```
+
+**Example: Master reads sensor packet**
+```c
+spi_slave_transmit(SPI2_HOST, &transaction, timeout);
+// Master receives 25,600 bytes of txBuf into rxBuf
+// This is one single blocking DMA transfer
+```
+
+---
 
 ---
 
@@ -206,23 +258,23 @@ Slave task starts: ambient light, IMU samples, IR read, RGB capture (11ms total)
 ### Step 2: Wait for Measurement Complete
 ```cpp
 Master polls: READ [ADDR_STATUS] → wait for STATUS_MEASURED
-Slave task does: Lock buffers, copy finalData → txBuf
-Polling continues until slave returns STATUS_LOCKED
+Slave task does: Completes data collection, signals STATUS_MEASURED
+Polling continues until slave returns STATUS_MEASURED
 ```
 
-### Step 3: Bulk Read Sensor Packet
-```cpp
-Master issues: SPI bulk read from ADDR_SENSOR_DATA
-Master receives: 25.6 KB of SensorDataPacket
-Slave: Data streamed via DMA
-Duration: ~25 ms @ 10 MHz clock
-```
-
-### Step 4: Lock Buffers (Prepare Data)
+### Step 3: Lock Buffers (Prepare Data)
 ```cpp
 Master sends: WRITE [ADDR_CTRL] = CTRL_LOCK_BUFFERS
 Slave: Copies currentData (with new timestamp/sequence) into txBuf
-Slave state: READY_TRANSFER
+Slave state: READY_TRANSFER (txBuf now contains the data to transmit)
+```
+
+### Step 4: Bulk Read Sensor Packet
+```cpp
+Master issues: SPI bulk read from ADDR_SENSOR_DATA
+Master receives: 25.6 KB of SensorDataPacket from txBuf
+Slave: Data streamed via DMA
+Duration: ~25 ms @ 10 MHz clock
 ```
 
 ### Step 5: Unlock and Next Cycle
@@ -427,9 +479,20 @@ Already in °C:  19.5°C (no conversion needed)
              ↓
              Slave: measurementCollectorTask wakes up
                     Collects all sensor data
-                    Locks buffers
+                    Sets STATUS_MEASURED
              ↓
-             Master: reads 25.6 KB packet via SPI
+             Master: polls STATUS until STATUS_MEASURED
+  ↓
+  Master: sends LOCK_BUFFERS
+             ↓
+             Slave: copies currentData → txBuf
+                    Sets STATE_READY_TRANSFER
+  ↓
+  Master: reads 25.6 KB packet via SPI bulk read from txBuf
+  ↓
+  Master: sends UNLOCK_BUFFERS
+             ↓
+             Slave: state = IDLE
   ↓
   Master: measureBatteryLevel(), measureAmbLight(), measurePIR(), measuremmWave()
   ↓
