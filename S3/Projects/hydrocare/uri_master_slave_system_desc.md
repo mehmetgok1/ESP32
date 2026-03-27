@@ -666,28 +666,45 @@ ir_celsius = (ir_raw / 100.0) - 40
 
 ### CSV Format Examples
 
-#### all_sensors.csv (summary data)
+#### all_sensors.csv
 ```
-First few rows:
-timestamp_ms,sequence,battery_v,battery_pct,ambient_light,pir_value,mmwave_dist,temp_avg_c,humidity_pct,accel_x_mg,accel_y_mg,accel_z_mg
-176078,21,4.18,92.1,145,0.32,250,21.5,44.8,2,5,-995
-176520,22,4.17,91.9,148,0.28,249,21.6,44.9,0,3,-998
-177520,23,4.16,91.7,151,0.25,248,21.7,45.0,-1,1,-1000
+timestamp_ms,sequence,battery_pct,ambLight_M,PIR,mmWave_dist,temp,humi,ambLight_S
+176078,21,92.1,145,0.32,250,21.5,44.8,156
+176520,22,91.9,148,0.28,249,21.6,44.9,158
+177520,23,91.7,151,0.25,248,21.7,45.0,151
 ...
 ```
 
-All values **already converted to user-friendly units** (Celsius, mG, %, etc.)
+One row per packet with sensor summary data:
+- `timestamp_ms` - Packet timestamp
+- `sequence` - Packet sequence number
+- `battery_pct` - Battery percentage (0-100%)
+- `ambLight_M` - Ambient light (master sensor)
+- `PIR` - PIR motion value
+- `mmWave_dist` - mmWave detection distance
+- `temp` - Average IR temperature (°C) 
+- `humi` - Humidity (%)
+- `ambLight_S` - Ambient light (slave sensor)
 
-#### accel_mic_stream.csv (2000 accel + 2000 mic samples per row)
+#### accel_mic_stream.csv
 ```
-First column and first 10 of 4000 values shown:
-packet_num,accel_x[0],accel_x[1],...,accel_x[1999],accel_y[0],...,mic[0],...,mic[1999]
-0,5,-2,10,15,8,-5,....
-1,8,0,12,18,5,-3,....
+timestamp_ms,accelX,accelY,accelZ,mic
+176078,-5,0,10,512
+176078,0,5,15,510
+176078,10,15,20,508
 ...
+176078,20,-10,25,480    ← 2000 rows all with same timestamp_ms
+176520,-8,8,12,500
+176520,5,10,18,498
+...
+176520,25,-5,30,470     ← 2000 more rows with next timestamp
 ```
 
-Each row is one complete 1-second @ 2kHz sample burst per packet.
+Each row is ONE accelerometer + microphone sample:
+- **2000 rows per packet** (2000 samples @ 2kHz = 1 second of data)
+- All rows in a packet share the same `timestamp_ms`
+- **accelX, accelY, accelZ** in **milligravity (mG)** - ready to use
+- **mic** in raw ADC units (application-dependent scaling)
 
 #### ir_*.csv - **REQUIRES CONVERSION**
 ```
