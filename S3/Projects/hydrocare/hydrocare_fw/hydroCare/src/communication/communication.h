@@ -65,7 +65,7 @@ typedef struct {
 } SensorDataPacket;
 #pragma pack()
 
-#define SPI_CLOCK_HZ     10000000   // 5 MHz (reduced from 10MHz for signal integrity)
+#define SPI_CLOCK_HZ     10000000   // 10 MHz 
 #define SPI_BUFFER_SIZE  25600      // 25.6KB buffer (handles ~24.6KB packet with 2k samples + margin)
 
 // Slave status bits
