@@ -84,44 +84,56 @@ void loop() {
       ambLight_Int = slaveData->ambientLight;
     }
     
+    // ==================== FILE ROTATION CHECK ====================
+    // Check if 60 seconds have elapsed and rotate files if needed
+    //checkAndRotateFiles(currentTimestamp);
+    
     // ==================== SD CARD LOGGING PHASE ====================
     // All SD operations grouped together: open once, write all, close once
     startTime = millis();
+    uint32_t opStart;
     
     // LOG SENSOR DATA
-    logSensorData(currentTimestamp, 
-                  batteryPercentage,
-                  ambLight,
-                  PIRValue,
-                  movingDist,
-                  movingEnergy,
-                  staticDist,
-                  staticEnergy,
-                  detectionDist,
-                  ambLight_Int,
-                  slaveData != nullptr ? slaveData->humidity : 0.0f,
-                  slaveData != nullptr ? slaveData->temperature : 0.0f);
-    Serial.printf("[SD] Sensor data logged: ts=%u ms\n", currentTimestamp);
+    opStart = millis();
+    // logSensorData(currentTimestamp, 
+    //               batteryPercentage,
+    //               ambLight,
+    //               PIRValue,
+    //               movingDist,
+    //               movingEnergy,
+    //               staticDist,
+    //               staticEnergy,
+    //               detectionDist,
+    //               ambLight_Int,
+    //               slaveData != nullptr ? slaveData->humidity : 0.0f,
+    //               slaveData != nullptr ? slaveData->temperature : 0.0f);
+    Serial.printf("[SD-PROFILE] logSensorData: DISABLED\n");
     
     // LOG MIC & ACCEL SAMPLES
     if (slaveData != nullptr) {
-      logMicAccelSamples(slaveData->accelX_samples, slaveData->accelY_samples, 
-                         slaveData->accelZ_samples, slaveData->microphoneSamples, 
-                         slaveData->accelSampleCount, currentTimestamp);
+      opStart = millis();
+      // logMicAccelSamples(slaveData->accelX_samples, slaveData->accelY_samples, 
+      //                    slaveData->accelZ_samples, slaveData->microphoneSamples, 
+      //                    slaveData->accelSampleCount, currentTimestamp);
+      Serial.printf("[SD-PROFILE] logMicAccelSamples: DISABLED\n");
     }
     
     // SAVE COLOR CAMERA (RGB565)
     if (slaveData != nullptr) {
-      saveRGBImage(slaveData->rgbFrame, currentTimestamp);
+      opStart = millis();
+      // saveRGBImage(slaveData->rgbFrame, currentTimestamp);
+      Serial.printf("[SD-PROFILE] saveRGBImage: DISABLED\n");
     }
     
     // SAVE THERMAL CAMERA (IR)
     if (slaveData != nullptr) {
-      saveIRImage(slaveData->irFrame, currentTimestamp);
+      opStart = millis();
+      // saveIRImage(slaveData->irFrame, currentTimestamp);
+      Serial.printf("[SD-PROFILE] saveIRImage: DISABLED\n");
     }
     
     duration = millis() - startTime;
-    Serial.printf("[TIMER] SD LOGGING BATCH: %u ms\n", duration);
+    Serial.printf("[TIMER] SD LOGGING BATCH: %u ms (DISABLED)\n", duration);
     
     // ==================== BLE NOTIFICATION PHASE ====================
     startTime = millis();

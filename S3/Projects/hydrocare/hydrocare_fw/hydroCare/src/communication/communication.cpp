@@ -75,13 +75,18 @@ uint8_t spiRead(uint8_t address) {
   digitalWrite(SPI_CS, LOW);
   delayMicroseconds(50);
   
+  // ATOMIC: Prevent task switching during critical SPI read
+  taskDISABLE_INTERRUPTS();
+  
   // Byte 0: Master sends command, discard slave's dummy response
   spi.transfer(cmdByte);
   
   // Byte 1: Master sends dummy (0x00), slave sends DATA/STATUS
   uint8_t readData = spi.transfer(0x00);
   
-  delayMicroseconds(20);
+  taskENABLE_INTERRUPTS();
+  
+  delayMicroseconds(50);
   digitalWrite(SPI_CS, HIGH);
   spi.endTransaction();
   
@@ -109,6 +114,9 @@ void spiWrite(uint8_t address, uint8_t data) {
   digitalWrite(SPI_CS, LOW);
   delayMicroseconds(50);
   
+  // ATOMIC: Prevent task switching during critical SPI write
+  taskDISABLE_INTERRUPTS();
+  
   // Byte 0: Master sends write command+address, discard dummy
   spi.transfer(cmdByte);
   
@@ -118,7 +126,9 @@ void spiWrite(uint8_t address, uint8_t data) {
   // Byte 2: Master sends actual WRITE DATA, slave sends ACK/DUMMY
   spi.transfer(data);
   
-  delayMicroseconds(20);
+  taskENABLE_INTERRUPTS();
+  
+  delayMicroseconds(50);
   digitalWrite(SPI_CS, HIGH);
   spi.endTransaction();
   
@@ -160,17 +170,19 @@ void spiReadBulk(uint8_t address, uint8_t *buffer, uint16_t numBytes) {
   digitalWrite(SPI_CS, LOW);
   delayMicroseconds(50);
   
-  // Byte 0: Master sends command, discard slave's dummy
-  spi.transfer(cmdByte);
+  // Fill TX buffer: first byte is command, rest are zeros (clock in slave response)
+  spiTxBuffer[0] = cmdByte;
+  memset(&spiTxBuffer[1], 0x00, numBytes + 1);  // Clear rest of buffer
   
-  // Byte 1: Master sends dummy (0x00), slave sends STATUS
-  uint8_t statusByte = spi.transfer(0x00);
+  // CRITICAL: Disable both interrupts AND FreeRTOS task switching during DMA transfer
+  // This prevents BLE/SD tasks from interrupting the critical SPI operation
+  taskDISABLE_INTERRUPTS();
+  spi.transferBytes(spiTxBuffer, spiRxBuffer, numBytes + 2);  // CMD + STATUS + DATA
+  taskENABLE_INTERRUPTS();
   
-  // Bytes 2 onwards: Master clocks in actual data
-  // Slave streams pre-prepared data continuously (no processing needed!)
-  for (uint16_t i = 0; i < numBytes; i++) {
-    buffer[i] = spi.transfer(0x00);
-  }
+  // Extract status from received byte 1 and sensor data from bytes 2+
+  uint8_t statusByte = spiRxBuffer[1];
+  memcpy(buffer, &spiRxBuffer[2], numBytes);
   
   delayMicroseconds(20);
   digitalWrite(SPI_CS, HIGH);
@@ -189,81 +201,50 @@ void spiReadBulk(uint8_t address, uint8_t *buffer, uint16_t numBytes) {
 // 5. Bulk read sensor data
 // Called from main.cpp every 1 second
 SensorDataPacket* readSlaveData() {
-  Serial.println("[Master] === Starting sensor data acquisition ===");
-  
+
   // ========== STEP 1: Set Trigger ==========
-  Serial.println("[Master] Step 1: Writing TRIGGER to control register...");
   spiWrite(ADDR_CTRL, CTRL_TRIGGER_MEASUREMENT);
-  delay(10);
-  
+  delay(1);
   // ========== STEP 2: Poll for MEASURED status ==========
-  Serial.println("[Master] Step 2: Polling for measurement complete...");
   uint32_t startTime = millis();
   uint8_t status = 0;
   bool measured = false;
-  
   while (millis() - startTime < 2000) {  // 2 second timeout
     status = spiRead(ADDR_STATUS);
     if (status & STATUS_MEASURED) {
-      Serial.printf("[Master] Measurement complete! Status: 0x%02X\n", status);
       measured = true;
       break;
     }
-    //Serial.printf("  Polling... status: 0x%02X\n", status);
-    delay(30);
+    delay(2);
   }
-  
   if (!measured) {
     Serial.println("[Master] ERROR: Timeout waiting for STATUS_MEASURED");
     return nullptr;
   }
-  
   // ========== STEP 3: Set Lock ==========
-  Serial.println("[Master] Step 3: Writing LOCK to control register...");
   spiWrite(ADDR_CTRL, CTRL_LOCK_BUFFERS);
-  delay(10);
-  
+  delay(2);
   // ========== STEP 4: Poll for LOCKED status ==========
-  Serial.println("[Master] Step 4: Polling for buffers locked...");
   startTime = millis();
   bool locked = false;
-  
   while (millis() - startTime < 2000) {  // 2 second timeout
     status = spiRead(ADDR_STATUS);
     if (status & STATUS_LOCKED) {
-      Serial.printf("[Master] Buffers locked! Status: 0x%02X\n", status);
       locked = true;
       break;
     }
-    //Serial.printf("  Polling... status: 0x%02X\n", status);
-    delay(5);
+    delay(2);
   }
-  
   if (!locked) {
     Serial.println("[Master] ERROR: Timeout waiting for STATUS_LOCKED");
     return nullptr;
   }
-  
   // ========== STEP 5: Bulk Read Sensor Data ==========
-  Serial.println("[Master] Step 5: Reading bulk sensor data from address 0...");
-  
-  // Use heap-allocated buffer (spiRxBuffer) instead of stack to avoid stack overflow
-  // spiReadBulk returns:
-  // [0]: Pre-prepared sensor data byte 0 (actual packet data)
-  // [1]: Pre-prepared sensor data byte 1
-  // ... etc
-  // NOTE: Status is logged inside spiReadBulk, we get pure sensor data back
   spiReadBulk(ADDR_SENSOR_DATA, spiRxBuffer, SPI_BUFFER_SIZE);
-  
-  Serial.printf("[Master] Received %u bytes of sensor data\n", SPI_BUFFER_SIZE);
-  
-  // Debug header - these are sensor data bytes, not protocol overhead
-  /*Serial.printf("[Debug] Raw buffer [0-15]: ");
-  for (int i = 0; i < 16; i++) {
-    Serial.printf("%02X ", spiRxBuffer[i]);
-  }
-  Serial.println();*/
-  
+  // ========== STEP 6: Release Lock ==========
+  delay(2);
+  spiWrite(ADDR_CTRL, CTRL_UNLOCK_BUFFERS);
+  delay(2);
   // Cast packet directly (data starts at byte 0 - pure sensor packet)
   SensorDataPacket *packet = (SensorDataPacket*)(spiRxBuffer);
   
@@ -273,66 +254,6 @@ SensorDataPacket* readSlaveData() {
   
   Serial.printf("[Samples] Accel count: %u | X:%+d Y:%+d Z:%+d mG\n",
     packet->accelSampleCount, packet->accelX, packet->accelY, packet->accelZ);
-  
-  // Calculate statistics for accel samples
-  /*if (packet->accelSampleCount > 0) {
-    int32_t sumX = 0, sumY = 0, sumZ = 0;
-    int16_t minX = 32767, maxX = -32768;
-    int16_t minY = 32767, maxY = -32768;
-    int16_t minZ = 32767, maxZ = -32768;
-    
-    for (int i = 0; i < packet->accelSampleCount; i++) {
-      sumX += packet->accelX_samples[i];
-      sumY += packet->accelY_samples[i];
-      sumZ += packet->accelZ_samples[i];
-      
-      if (packet->accelX_samples[i] < minX) minX = packet->accelX_samples[i];
-      if (packet->accelX_samples[i] > maxX) maxX = packet->accelX_samples[i];
-      if (packet->accelY_samples[i] < minY) minY = packet->accelY_samples[i];
-      if (packet->accelY_samples[i] > maxY) maxY = packet->accelY_samples[i];
-      if (packet->accelZ_samples[i] < minZ) minZ = packet->accelZ_samples[i];
-      if (packet->accelZ_samples[i] > maxZ) maxZ = packet->accelZ_samples[i];
-    }
-    
-    float avgX = (float)sumX / packet->accelSampleCount;
-    float avgY = (float)sumY / packet->accelSampleCount;
-    float avgZ = (float)sumZ / packet->accelSampleCount;
-    
-    Serial.printf("[1kHz Accel Stats] X: avg=%+.1f min=%+d max=%+d\n", avgX, minX, maxX);
-    Serial.printf("[1kHz Accel Stats] Y: avg=%+.1f min=%+d max=%+d\n", avgY, minY, maxY);
-    Serial.printf("[1kHz Accel Stats] Z: avg=%+.1f min=%+d max=%+d\n", avgZ, minZ, maxZ);
-  }*/
-  
-  // Microphone statistics
-  /*uint16_t micMin = 65535, micMax = 0;
-  uint32_t micSum = 0;
-  for (int i = 0; i < 2000; i++) {
-    if (packet->microphoneSamples[i] < micMin) micMin = packet->microphoneSamples[i];
-    if (packet->microphoneSamples[i] > micMax) micMax = packet->microphoneSamples[i];
-    micSum += packet->microphoneSamples[i];
-  }
-  uint16_t micAvg = micSum / 2000;
-  Serial.printf("[Microphone] Avg=%u | Min=%u Max=%u | Sample[0-4]: %u %u %u %u %u\n", 
-    micAvg, micMin, micMax, 
-    packet->microphoneSamples[0], packet->microphoneSamples[1], packet->microphoneSamples[2], 
-    packet->microphoneSamples[3], packet->microphoneSamples[4]);
-  
-  // Frame statistics (RGB & IR)
-  uint16_t rgbMin = 65535, rgbMax = 0;
-  for (int i = 0; i < 4096; i++) {
-    if (packet->rgbFrame[i] < rgbMin) rgbMin = packet->rgbFrame[i];
-    if (packet->rgbFrame[i] > rgbMax) rgbMax = packet->rgbFrame[i];
-  }
-  
-  uint16_t irMin = 65535, irMax = 0;
-  for (int i = 0; i < 192; i++) {
-    if (packet->irFrame[i] < irMin) irMin = packet->irFrame[i];
-    if (packet->irFrame[i] > irMax) irMax = packet->irFrame[i];
-  }
-  
-  Serial.printf("[Frames] RGB: [%u - %u] | IR: [%u - %u]\n", rgbMin, rgbMax, irMin, irMax);
-  Serial.println("[Master] === Sensor data acquisition complete! ===\n");*/
-  
   return packet;
 }
 

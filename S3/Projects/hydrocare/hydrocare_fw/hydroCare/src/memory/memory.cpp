@@ -10,6 +10,37 @@
 
 String sessionFolder = "";  // Root session folder path
 
+// Persistent file handles - kept open during 60-second rotation window
+static File sensorFile;
+static File micAccelFile;
+static File rgbSessionFile;
+static File irSessionFile;
+
+// Rotation tracking
+static uint32_t sessionStartTime = 0;      // milliseconds when logging started
+static uint32_t lastRotationTime = 0;      // milliseconds of last file rotation
+static const uint32_t ROTATION_INTERVAL = 60000;  // 60 seconds in milliseconds
+
+// Generate timestamped filename (for rotation)
+String generateRotatedFilename(String folder, String baseName, uint32_t timestamp) {
+  time_t timeVal = timestamp / 1000;  // Convert ms to seconds
+  struct tm* timeinfo = localtime(&timeVal);
+  char filename[64];
+  strftime(filename, sizeof(filename), ".csv", timeinfo);
+  
+  // Format: /sessionFolder/folder/basename_HHMMSS.csv
+  char fullPath[128];
+  snprintf(fullPath, sizeof(fullPath), "%s/%s/%s_%02d%02d%02d.csv", 
+    sessionFolder.c_str(), 
+    folder.c_str(),
+    baseName.c_str(),
+    timeinfo->tm_hour,
+    timeinfo->tm_min,
+    timeinfo->tm_sec);
+  
+  return String(fullPath);
+}
+
 uint8_t eepromRead(uint8_t address)
 {
     return EEPROM.read(address);
@@ -98,32 +129,36 @@ String getMicAccelPath() {
 
 
 
-// Initialize the mic&accel CSV file with header
-void openMicAccelFile() {
-  String micAccelFile = getMicAccelPath();
+// Initialize the mic&accel CSV file with header (called at session start and rotation)
+void openMicAccelFile(uint32_t timestamp) {
+  String micAccelFilePath = generateRotatedFilename("mic&accel", "micaccel", timestamp ? timestamp : millis());
+  
+  micAccelFile = SD.open(micAccelFilePath.c_str(), FILE_WRITE);
+  if (!micAccelFile) {
+    Serial.println("Failed to open mic&accel file for writing");
+    return;
+  }
   
   // Create header for column format
   String header = "timestamp_ms,mic,accelX,accelY,accelZ";
   
-  File file = SD.open(micAccelFile.c_str(), FILE_WRITE);
-  if (!file) {
-    Serial.println("Failed to open mic&accel file for writing");
-    return;
-  }
-  if (file.println(header)) {
-    Serial.println("Mic&Accel CSV header written to: " + micAccelFile);
+  if (micAccelFile.println(header)) {
+    Serial.println("Mic&Accel CSV header written to: " + micAccelFilePath);
   } else {
     Serial.println("Mic&Accel header write failed");
   }
-  file.close();
 }
 
 
 
-// Log 2000 microphone & accelerometer samples to mic&accel CSV
+// Log 2000 microphone & accelerometer samples to persistent mic&accel CSV
 // Column format: timestamp, mic, accelX, accelY, accelZ (2000 rows)
+// OPTIMIZED: Use static buffer with chunked writes to avoid SD card stalls
 void logMicAccelSamples(int16_t* accelX, int16_t* accelY, int16_t* accelZ, uint16_t* mic, uint16_t sampleCount, uint32_t timestamp) {
-  String micAccelFile = getMicAccelPath();
+  if (!micAccelFile) {
+    Serial.println("Mic/Accel file not open");
+    return;
+  }
   
   if (sampleCount == 0) {
     Serial.println("No mic/accel samples to log");
@@ -133,173 +168,250 @@ void logMicAccelSamples(int16_t* accelX, int16_t* accelY, int16_t* accelZ, uint1
   // Ensure we don't exceed 2000 samples
   if (sampleCount > 2000) sampleCount = 2000;
   
-  File file = SD.open(micAccelFile, FILE_APPEND);
-  if (!file) {
-    Serial.println("Failed to open mic&accel file for appending");
-    return;
-  }
-  
-  // Burst write: Build entire CSV in buffer first, then write once
-  // Allocate buffer for all 2000 rows (~65 KB)
-  size_t bufferSize = sampleCount * 50; // Conservative estimate: ~50 bytes per row with newline
-  char* csvBuffer = (char*)malloc(bufferSize);
-  
-  if (!csvBuffer) {
-    Serial.println("Failed to allocate buffer for burst write");
-    file.close();
-    return;
-  }
-  
+  // Use static buffer (100KB) - no malloc, no fragmentation!
+  static char csvBuffer[102400];  // 100KB static buffer for 2000 samples
   size_t offsetPos = 0;
   
   // Build entire CSV content in buffer
   for (uint16_t i = 0; i < sampleCount; i++) {
-    int written = snprintf(csvBuffer + offsetPos, bufferSize - offsetPos, "%u,%u,%d,%d,%d\n",
-      timestamp,
-      mic[i],
-      accelX[i],
-      accelY[i],
-      accelZ[i]
-    );
+    int written = snprintf(csvBuffer + offsetPos, sizeof(csvBuffer) - offsetPos, "%u,%u,%d,%d,%d\n",
+      timestamp, mic[i], accelX[i], accelY[i], accelZ[i]);
     if (written > 0) {
       offsetPos += written;
     }
   }
   
-  // Burst write entire buffer at once
-  if (offsetPos > 0) {
-    file.write((uint8_t*)csvBuffer, offsetPos);
+  // Chunked write: Write in 10KB chunks to avoid SD card stalls
+  const size_t CHUNK_SIZE = 10240;  // 10KB chunks
+  size_t bytesWritten = 0;
+  
+  while (bytesWritten < offsetPos) {
+    size_t chunkSize = (offsetPos - bytesWritten > CHUNK_SIZE) ? CHUNK_SIZE : (offsetPos - bytesWritten);
+    micAccelFile.write((uint8_t*)(csvBuffer + bytesWritten), chunkSize);
+    bytesWritten += chunkSize;
   }
   
-  free(csvBuffer);
-  file.close();
-  Serial.println("Mic/Accel samples logged (" + String(sampleCount) + " samples, burst write)");
+  Serial.println("Mic/Accel samples logged (" + String(sampleCount) + " samples, " + String(offsetPos) + " bytes)");
 }
 
-// Initialize sensor data CSV file with comprehensive header
-void initSensorDataFile() {
-  String sensorFile = getSensorDataPath();
+// Initialize sensor data CSV file with comprehensive header (called at session start and rotation)
+void openSensorDataFile(uint32_t timestamp) {
+  String sensorFilePath = generateRotatedFilename("sensor_data", "sensor", timestamp ? timestamp : millis());
   
-  String header = "timestamp_ms,battery_pct,ambLight_master,pir,mmwave_dist,mmwave_energy,static_dist,static_energy,detection_dist,ambLight_slave,humidity,temperature";
-  
-  File file = SD.open(sensorFile.c_str(), FILE_WRITE);
-  if (!file) {
+  sensorFile = SD.open(sensorFilePath.c_str(), FILE_WRITE);
+  if (!sensorFile) {
     Serial.println("Failed to open sensor data file for writing");
     return;
   }
-  if (file.println(header)) {
-    Serial.println("Sensor data CSV header written to: " + sensorFile);
+  
+  String header = "timestamp_ms,battery_pct,ambLight_master,pir,mmwave_dist,mmwave_energy,static_dist,static_energy,detection_dist,ambLight_slave,humidity,temperature";
+  
+  if (sensorFile.println(header)) {
+    Serial.println("Sensor data CSV header written to: " + sensorFilePath);
   } else {
     Serial.println("Sensor data header write failed");
   }
-  file.close();
 }
 
-// Log sensor data (master and slave) to sensor CSV with timestamp
-void logSensorData(uint32_t timestamp, float batteryPct, float ambLight, float pir, float mmWaveDist, float mmWaveEnergy, 
-                   float staticDist, float staticEnergy, float detectionDist, float ambLight_slave, float humidity, float temperature) {
-  String sensorFile = getSensorDataPath();
+// Old function - kept for compatibility, redirects to new one
+void initSensorDataFile() {
+  openSensorDataFile();
+}
+
+// Open persistent RGB session file (called at session start and rotation)
+void openRGBSessionFile(uint32_t timestamp) {
+  String rgbFilePath = generateRotatedFilename("color_camera", "rgb", timestamp ? timestamp : millis());
   
-  String dataRow = String(timestamp) + "," +
-                   String(batteryPct, 2) + "," +
-                   String(ambLight, 2) + "," +
-                   String(pir, 2) + "," +
-                   String(mmWaveDist, 2) + "," +
-                   String(mmWaveEnergy, 2) + "," +
-                   String(staticDist, 2) + "," +
-                   String(staticEnergy, 2) + "," +
-                   String(detectionDist, 2) + "," +
-                   String(ambLight_slave, 2) + "," +
-                   String(humidity, 2) + "," +
-                   String(temperature, 2);
-  
-  File file = SD.open(sensorFile, FILE_APPEND);
-  if (!file) {
-    Serial.println("Failed to open sensor data file for appending");
+  rgbSessionFile = SD.open(rgbFilePath.c_str(), FILE_WRITE);
+  if (!rgbSessionFile) {
+    Serial.println("Failed to open RGB session file");
     return;
   }
   
-  if (file.println(dataRow)) {
-    Serial.printf("[SD] Sensor data logged: ts=%u ms\n", timestamp);
-  } else {
-    Serial.println("Sensor data write failed");
-  }
-  file.close();
+  Serial.println("RGB session file opened: " + rgbFilePath);
 }
 
-// Save RGB565 image as raw binary file (.rgb565)
-// Raw binary: 64x64 image with RGB565 pixel data (8192 bytes)
+// Open persistent IR session file (called at session start and rotation)
+void openIRSessionFile(uint32_t timestamp) {
+  String irFilePath = generateRotatedFilename("thermal_camera", "ir", timestamp ? timestamp : millis());
+  
+  irSessionFile = SD.open(irFilePath.c_str(), FILE_WRITE);
+  if (!irSessionFile) {
+    Serial.println("Failed to open IR session file");
+    return;
+  }
+  
+  Serial.println("IR session file opened: " + irFilePath);
+}
+
+// Close all persistent files (called at session end)
+void closeSessionFiles() {
+  if (sensorFile) {
+    sensorFile.close();
+    Serial.println("Sensor file closed");
+  }
+  if (micAccelFile) {
+    micAccelFile.close();
+    Serial.println("Mic/Accel file closed");
+  }
+  if (rgbSessionFile) {
+    rgbSessionFile.close();
+    Serial.println("RGB file closed");
+  }
+  if (irSessionFile) {
+    irSessionFile.close();
+    Serial.println("IR file closed");
+  }
+}
+
+// Check if 60 seconds have elapsed and rotate files if needed
+void checkAndRotateFiles(uint32_t currentTime) {
+  // Initialize on first call
+  if (sessionStartTime == 0) {
+    sessionStartTime = currentTime;
+    lastRotationTime = currentTime;
+    return;
+  }
+  
+  // Check if 60 seconds have passed since last rotation
+  if (currentTime - lastRotationTime >= ROTATION_INTERVAL) {
+    Serial.printf("[ROTATION] 60 seconds elapsed, rotating all files at %u ms\n", currentTime);
+    lastRotationTime = currentTime;
+    
+    // Close all current files
+    if (sensorFile) sensorFile.close();
+    if (micAccelFile) micAccelFile.close();
+    if (rgbSessionFile) rgbSessionFile.close();
+    if (irSessionFile) irSessionFile.close();
+    
+    // Reopen with new timestamps
+    openSensorDataFile(currentTime);
+    openMicAccelFile(currentTime);
+    openRGBSessionFile(currentTime);
+    openIRSessionFile(currentTime);
+  }
+}
+
+// Log sensor data (master and slave) to persistent sensor CSV
+void logSensorData(uint32_t timestamp, float batteryPct, float ambLight, float pir, float mmWaveDist, float mmWaveEnergy, 
+                   float staticDist, float staticEnergy, float detectionDist, float ambLight_slave, float humidity, float temperature) {
+  if (!sensorFile) {
+    Serial.println("Sensor file not open");
+    return;
+  }
+  
+  sensorFile.printf("%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+    timestamp, batteryPct, ambLight, pir, mmWaveDist, mmWaveEnergy, 
+    staticDist, staticEnergy, detectionDist, ambLight_slave, humidity, temperature);
+  
+  Serial.printf("[SD] Sensor data logged: ts=%u ms\n", timestamp);
+}
+
+// Save RGB565 image as 2D grid in persistent CSV (called every cycle)
+// OPTIMIZED: Buffer entire grid in RAM, write once (not 4096 printf calls)
+// Format:
+//   timestamp
+//   row0: rgb[0,0], rgb[0,1], ..., rgb[0,63]
+//   row1: rgb[1,0], rgb[1,1], ..., rgb[1,63]
+//   ...
+//   row63: rgb[63,0], rgb[63,1], ..., rgb[63,63]
 void saveRGBImage(uint16_t* rgbFrame, uint32_t timestamp) {
   if (rgbFrame == nullptr) {
     Serial.println("[RGB] No frame data to save");
     return;
   }
   
-  // Create filename with timestamp
-  char filename[64];
-  snprintf(filename, sizeof(filename), "%s/color_camera/%u.rgb565", sessionFolder.c_str(), timestamp);
-  
-  // RGB565 image: 64x64 pixels = 4096 pixels * 2 bytes = 8192 bytes
-  const uint16_t width = 64;
-  const uint16_t height = 64;
-  const size_t dataSize = width * height * sizeof(uint16_t);
-  
-  File file = SD.open(filename, FILE_WRITE);
-  if (!file) {
-    Serial.printf("[RGB] Failed to open file: %s\n", filename);
+  if (!rgbSessionFile) {
+    Serial.println("[RGB] Session file not open");
     return;
   }
   
-  // Burst write: write all RGB565 data in one call (8KB raw binary)
-  size_t bytesWritten = file.write((uint8_t*)rgbFrame, dataSize);
-  file.close();
+  // Allocate buffer for entire 64x64 grid (~25KB)
+  // Format: timestamp(1 line) + 64 rows × 64 values (5 digits + comma) + newlines
+  static char rgbBuffer[32768];  // 32KB static buffer
+  int pos = 0;
   
-  Serial.printf("[RGB] Raw RGB565 saved: %s (%zu bytes, burst write)\n", filename, bytesWritten);
+  // Write timestamp header
+  pos += snprintf(rgbBuffer + pos, sizeof(rgbBuffer) - pos, "%u\n", timestamp);
+  
+  // Write 64x64 grid (64 rows x 64 columns)
+  const int width = 64;
+  const int height = 64;
+  
+  for (int row = 0; row < height; row++) {
+    for (int col = 0; col < width; col++) {
+      int idx = row * width + col;
+      if (col < width - 1) {
+        pos += snprintf(rgbBuffer + pos, sizeof(rgbBuffer) - pos, "%u,", rgbFrame[idx]);
+      } else {
+        pos += snprintf(rgbBuffer + pos, sizeof(rgbBuffer) - pos, "%u\n", rgbFrame[idx]);
+      }
+    }
+  }
+  
+  // Chunked write: Write in 10KB chunks to avoid SD card stalls
+  const size_t CHUNK_SIZE = 10240;  // 10KB chunks
+  size_t bytesWritten = 0;
+  
+  while (bytesWritten < pos) {
+    size_t chunkSize = (pos - bytesWritten > CHUNK_SIZE) ? CHUNK_SIZE : (pos - bytesWritten);
+    rgbSessionFile.write((uint8_t*)(rgbBuffer + bytesWritten), chunkSize);
+    bytesWritten += chunkSize;
+  }
+  
+  Serial.printf("[RGB] 64x64 grid saved (timestamp=%u, %d bytes)\n", timestamp, pos);
 }
 
-// Save IR thermal image as CSV (16x12 grid of decimal values)
+// Save IR thermal image as 2D grid in persistent CSV (called every cycle)
+// OPTIMIZED: Buffer entire grid in RAM, write once (not 192 printf calls)
+// Format:
+//   timestamp
+//   row0: ir[0,0], ir[0,1], ..., ir[0,15]
+//   row1: ir[1,0], ir[1,1], ..., ir[1,15]
+//   ...
+//   row11: ir[11,0], ir[11,1], ..., ir[11,15]
 void saveIRImage(uint16_t* irFrame, uint32_t timestamp) {
   if (irFrame == nullptr) {
     Serial.println("[IR] No frame data to save");
     return;
   }
   
-  // Create filename with timestamp
-  char filename[64];
-  snprintf(filename, sizeof(filename), "%s/thermal_camera/%u.csv", sessionFolder.c_str(), timestamp);
-  
-  // IR thermal image: 16x12 pixels
-  const uint16_t width = 16;
-  const uint16_t height = 12;
-  
-  File file = SD.open(filename, FILE_WRITE);
-  if (!file) {
-    Serial.printf("[IR] Failed to open file: %s\n", filename);
+  if (!irSessionFile) {
+    Serial.println("[IR] Session file not open");
     return;
   }
   
-  // Write thermal data as 12 rows x 16 columns CSV with decimal values
-  size_t bytesWritten = 0;
+  // Allocate buffer for entire 12x16 grid (~2KB)
+  static char irBuffer[4096];  // 4KB static buffer
+  int pos = 0;
+  
+  // Write timestamp header
+  pos += snprintf(irBuffer + pos, sizeof(irBuffer) - pos, "%u\n", timestamp);
+  
+  // Write 12x16 grid (12 rows x 16 columns)
+  const int width = 16;
+  const int height = 12;
+  
   for (int row = 0; row < height; row++) {
     for (int col = 0; col < width; col++) {
-      uint16_t value = irFrame[row * width + col];
-      
-      // Write decimal value
-      char buffer[16];
-      int len = snprintf(buffer, sizeof(buffer), "%u", value);
-      bytesWritten += file.write((uint8_t*)buffer, len);
-      
-      // Add comma separator except for last column
+      int idx = row * width + col;
       if (col < width - 1) {
-        file.write(',');
-        bytesWritten++;
+        pos += snprintf(irBuffer + pos, sizeof(irBuffer) - pos, "%u,", irFrame[idx]);
+      } else {
+        pos += snprintf(irBuffer + pos, sizeof(irBuffer) - pos, "%u\n", irFrame[idx]);
       }
     }
-    // Add newline at end of row
-    file.println();
-    bytesWritten += 2;  // \r\n
   }
   
-  file.close();
-  Serial.printf("[IR] Thermal CSV saved: %s (%zu bytes)\n", filename, bytesWritten);
+  // Chunked write: Write in 10KB chunks to avoid SD card stalls
+  const size_t CHUNK_SIZE = 10240;  // 10KB chunks
+  size_t bytesWritten = 0;
+  
+  while (bytesWritten < pos) {
+    size_t chunkSize = (pos - bytesWritten > CHUNK_SIZE) ? CHUNK_SIZE : (pos - bytesWritten);
+    irSessionFile.write((uint8_t*)(irBuffer + bytesWritten), chunkSize);
+    bytesWritten += chunkSize;
+  }
+  
+  Serial.printf("[IR] 12x16 grid saved (timestamp=%u, %d bytes)\n", timestamp, pos);
 }

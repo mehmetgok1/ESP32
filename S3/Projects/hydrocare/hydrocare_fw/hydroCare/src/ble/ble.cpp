@@ -94,6 +94,8 @@ class ActionCallbacks: public NimBLECharacteristicCallbacks {
                 initSessionFolder();
                 openMicAccelFile();   // Initialize mic&accel CSV with header
                 initSensorDataFile(); // Initialize sensor data CSV with header
+                openRGBSessionFile(); // Open persistent RGB stream file
+                openIRSessionFile();  // Open persistent IR stream file
                 
                 sessionInitialized = true;  // NOW safe to log
                 Serial.println("[BLE] Session files ready for logging");
@@ -102,9 +104,8 @@ class ActionCallbacks: public NimBLECharacteristicCallbacks {
             else if(command.startsWith("Com;Stop")){
                 deviceStatus = 0;
                 sessionInitialized = false;  // Reset for next session
-                Serial.println("[SD] Stop Logging. Closing file.");
-                // The logData function closes the file after every write, 
-                // but you can add a final sync or serial log here.
+                closeSessionFiles();  // Close persistent RGB/IR files
+                Serial.println("[SD] Stop Logging. Session files closed.");
             }
             // --- CONTROL PARSER ---
             else if (command.startsWith("Com;Control")) {

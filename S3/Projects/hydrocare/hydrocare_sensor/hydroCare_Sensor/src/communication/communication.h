@@ -22,6 +22,7 @@
 // Control register values
 #define CTRL_TRIGGER_MEASUREMENT 0x01
 #define CTRL_LOCK_BUFFERS 0x02
+#define CTRL_UNLOCK_BUFFERS 0x03
 
 // Slave status bits
 #define STATUS_MEASURING 0x01       // Measurement in progress
@@ -66,8 +67,5 @@ void startMeasurementTask();          // Start background measurement collector 
 void startHighSpeedSamplerTask();     // Start 2kHz accel+mic sampler task
 void startIRSensorTask();             // Start background IR thermal sensor task (200ms)
 void startBMESensorTask();            // Start background BME688 sensor task (200ms)
-
-// Get slave status byte
-uint8_t getStatusByte();
 
 #endif

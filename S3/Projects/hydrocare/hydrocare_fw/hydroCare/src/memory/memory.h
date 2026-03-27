@@ -22,9 +22,14 @@ void logMicAccelSamples(int16_t* accelX, int16_t* accelY, int16_t* accelZ, uint1
 void logData(String data);
 void logSensorData(uint32_t timestamp, float batteryPct, float ambLight, float pir, float mmWaveDist, float mmWaveEnergy, 
                    float staticDist, float staticEnergy, float detectionDist, float ambLight_slave, float humidity, float temperature);
-void openMicAccelFile();           // Initialize mic&accel CSV with header
+void openMicAccelFile(uint32_t timestamp = 0);           // Initialize mic&accel CSV with header
 void initSensorDataFile();         // Initialize sensor data CSV with header
-void saveRGBImage(uint16_t* rgbFrame, uint32_t timestamp);  // Save RGB565 as BMP
-void saveIRImage(uint16_t* irFrame, uint32_t timestamp);    // Save IR thermal as BMP
+void openSensorDataFile(uint32_t timestamp = 0);       // Open sensor data file (for rotation)
+void openRGBSessionFile(uint32_t timestamp = 0);       // Open persistent RGB file at session start
+void openIRSessionFile(uint32_t timestamp = 0);        // Open persistent IR file at session start
+void closeSessionFiles();          // Close persistent RGB/IR files at session stop
+void checkAndRotateFiles(uint32_t currentTime);  // Check if 60 seconds elapsed and rotate
+void saveRGBImage(uint16_t* rgbFrame, uint32_t timestamp);  // Append RGB frame to stream
+void saveIRImage(uint16_t* irFrame, uint32_t timestamp);    // Append IR frame to stream
 
 #endif
