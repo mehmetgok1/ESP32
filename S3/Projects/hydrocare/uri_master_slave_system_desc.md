@@ -605,64 +605,14 @@ The script automatically:
 5. ✅ Generates PNG images (RGB frames)
 6. ✅ Organizes into intuitive folder structure
 
-### Data Conversion Details
+### Data Conversion Summary
 
-**⚠️ IMPORTANT: IR thermal data in CSV files is RAW uint16_t (fixed-point encoded)**
+**all_sensors.csv & accel_mic_stream.csv:** Ready-to-use (temp in °C, accel in mG)
 
-#### all_sensors.csv
-```
-timestamp_ms,sequence,battery_v,battery_pct,ambient_light,pir_value,mmwave_dist,temp_avg_c,humidity_pct,accel_x_mg,accel_y_mg,accel_z_mg
-1234567,1,4.15,87.3,156,0.45,245,21.3,45.2,0,0,-980
-1235567,2,4.14,87.1,158,0.42,244,21.4,45.3,5,-10,-975
-...
-```
-
-Values are **already converted** for user consumption (temp in °C, accel in mG, etc.)
-
-#### accel_mic_stream.csv (per-packet high-speed samples)
-```
-packet_num,timestamp_ms,accel_x_mg[0],accel_x_mg[1],...,accel_x_mg[1999],accel_y_mg[0],...,mic[0],...,mic[1999]
-0,176078,-5,0,10,15,...,20,5,-10,...,512
-1,176520,-8,5,12,18,...,25,8,-8,...,510
-...
-```
-
-Accelerometer already in **mG** (milligravity)
-Microphone in **raw ADC units**
-
-#### ir_*.csv - **⚠️ CONTAINS RAW UINT16 - CONVERSION REQUIRED**
-
-```
-row,col_0,col_1,col_2,...,col_15
-0,6341,6342,6331,6335,6355,6354,6357,6355,6372,6363,6373,6374,6378,6374,6386,6387
-1,6334,6338,6326,6340,6351,6353,6351,6354,6360,6363,6365,6364,6367,6378,6383,6384
-...
-11,6250,6280,6310,6340,6370,6235,6265,6295,6325,6355,6385,6415,6445,6475,6505,6535
-```
-
-**These are raw uint16_t fixed-point values. You MUST convert them:**
-
+**⚠️ ir_*.csv files ONLY:** Contain raw uint16_t requiring conversion:
 ```python
-# Conversion formula (required for every value):
-temp_celsius = (raw_uint16 / 100.0) - 40
-
-# Example:
-# raw = 6341
-# temp_c = (6341 / 100.0) - 40 = 63.41 - 40 = 23.41°C
-
-# NumPy vectorized (for all values in array):
-import numpy as np
-ir_raw = np.array([[6341, 6342, 6331, ...], ...])  # Read from CSV
-ir_celsius = (ir_raw / 100.0) - 40
+temp_celsius = (raw_uint16 / 100.0) - 40  # Example: 6341 → 23.41°C
 ```
-
-**Why raw uint16?** Saves space in CSV (6341 vs 23.41). Conversion is trivial in post-processing.
-
-#### RGB Frames (colored_image/rgb_*.png)
-- **Size:** 64×64 pixels
-- **Format:** RGB PNG (8 bits per channel)
-- **Conversion:** RGB565 → RGB888 already done by script
-- **Naming:** `rgb_{timestamp_ms}_{packet_number}.png`
 
 ### CSV Format Examples
 
