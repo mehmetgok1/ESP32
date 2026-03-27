@@ -146,12 +146,29 @@ spi_slave_transmit(SPI2_HOST, &transaction, timeout);
 ### Status Register (Slave-to-Master Responses)
 
 **Byte 1 of every SPI transaction (status byte):**
+
+This byte is **prefilled in txBuf[1]** and **automatically updated** by the slave in the background:
+
+```c
+// In slave's communication.cpp, txBuf is initialized as:
+txBuf[0] = 0x00;  // Dummy (always 0x00)
+txBuf[1] = 0x00;  // Status byte (updated on state changes)
+txBuf[2+] = ...;  // Sensor data (bulk read only)
+```
+
+**Status byte contents:**
 ```c
 #define STATUS_IDLE         0x00   // Ready for next trigger
 #define STATUS_MEASURING    0x01   // Currently measuring
 #define STATUS_MEASURED     0x02   // Measurement complete, data ready
 #define STATUS_LOCKED       0x04   // Data locked, can be read
 ```
+
+**How it works:**
+- **Every SPI transaction returns the current status at byte 1** (no extra overhead)
+- Status is updated by background tasks on state changes
+- Master can poll by reading byte 1 repeatedly
+- Master always knows slave state without extra commands
 
 ---
 
