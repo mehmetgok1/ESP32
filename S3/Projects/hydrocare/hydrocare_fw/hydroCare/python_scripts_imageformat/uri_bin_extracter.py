@@ -34,7 +34,7 @@ combined_packet_dtype = np.dtype([
 ])
 
 # AYARLAR
-session_path = "/media/deso/BOOT/20260327_195913"
+session_path = "/media/deso/BOOT/20260327_204630"
 session_id = os.path.basename(session_path)
 output_base = os.path.join("./processed_sessions", session_id)
 
