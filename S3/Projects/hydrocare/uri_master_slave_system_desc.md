@@ -1,5 +1,7 @@
 # HydroCare Master-Slave System Architecture
 
+Master fw version :  0.0.21
+Slave  fw version :  0.0.13
 ## System Overview
 
 HydroCare is a **distributed IoT sensor system** with two ESP32-S3 processors:

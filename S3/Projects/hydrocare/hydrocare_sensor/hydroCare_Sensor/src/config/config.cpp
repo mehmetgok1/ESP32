@@ -2,7 +2,7 @@
 #include "config/config.h"
 #include "communication/communication.h"
 
-#define fw_version  "0.0.12"
+#define fw_version  "0.0.13"
 
 void initPins()
 {

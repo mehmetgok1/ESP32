@@ -2,7 +2,7 @@
 #include "config/config.h"
 #include <SPI.h>
 
-String fw_version = "0.0.20";
+String fw_version = "0.0.21";
 
 SPISettings sdSPI(16000000, MSBFIRST, SPI_MODE0);
 
