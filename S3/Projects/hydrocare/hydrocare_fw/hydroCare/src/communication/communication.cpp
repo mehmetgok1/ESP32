@@ -182,7 +182,7 @@ void spiReadBulk(uint8_t address, uint8_t *buffer, uint16_t numBytes) {
   
   // Extract status from received byte 1 and sensor data from bytes 2+
   uint8_t statusByte = spiRxBuffer[1];
-  memcpy(buffer, &spiRxBuffer[2], numBytes);
+  memmove(buffer, &spiRxBuffer[2], numBytes);
   
   delayMicroseconds(50);
   digitalWrite(SPI_CS, HIGH);
@@ -204,6 +204,7 @@ SensorDataPacket* readSlaveData() {
 
   // ========== STEP 1: Set Trigger ==========
   spiWrite(ADDR_CTRL, CTRL_TRIGGER_MEASUREMENT);
+  Serial.println("[Master] write trigger measurement command");
   delay(1);
   // ========== STEP 2: Poll for MEASURED status ==========
   uint32_t startTime = millis();
@@ -211,11 +212,11 @@ SensorDataPacket* readSlaveData() {
   bool measured = false;
   while (millis() - startTime < 2000) {  // 2 second timeout
     status = spiRead(ADDR_STATUS);
-    if (status & STATUS_MEASURED) {
+    if (status != 0xFF && (status & STATUS_MEASURED)) {
       measured = true;
       break;
     }
-    delay(1);
+    delay(2);
   }
   if (!measured) {
     Serial.println("[Master] ERROR: Timeout waiting for STATUS_MEASURED");
@@ -223,17 +224,18 @@ SensorDataPacket* readSlaveData() {
   }
   // ========== STEP 3: Set Lock ==========
   spiWrite(ADDR_CTRL, CTRL_LOCK_BUFFERS);
-  delay(1);
+  Serial.println("[Master] write lock data trigger");
+  delay(2);
   // ========== STEP 4: Poll for LOCKED status ==========
   startTime = millis();
   bool locked = false;
   while (millis() - startTime < 2000) {  // 2 second timeout
     status = spiRead(ADDR_STATUS);
-    if (status & STATUS_LOCKED) {
+    if (status != 0xFF && (status & STATUS_LOCKED)) {
       locked = true;
       break;
     }
-    delay(1);
+    delay(3);
   }
   if (!locked) {
     Serial.println("[Master] ERROR: Timeout waiting for STATUS_LOCKED");
@@ -241,9 +243,12 @@ SensorDataPacket* readSlaveData() {
   }
   // ========== STEP 5: Bulk Read Sensor Data ==========
   spiReadBulk(ADDR_SENSOR_DATA, spiRxBuffer, SPI_BUFFER_SIZE);
+  Serial.println("[Master] Ready to process sensor data packet");
+
   // ========== STEP 6: Release Lock ==========
   delay(1);
   spiWrite(ADDR_CTRL, CTRL_UNLOCK_BUFFERS);
+  Serial.println("[Master] write unlock buffers command");
   delay(1);
   // Cast packet directly (data starts at byte 0 - pure sensor packet)
   SensorDataPacket *packet = (SensorDataPacket*)(spiRxBuffer);

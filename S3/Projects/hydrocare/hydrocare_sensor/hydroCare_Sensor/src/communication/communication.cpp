@@ -456,6 +456,10 @@ void receiveCommand() {
     else {
       Serial.printf("ERROR: WRITE unknown address 0x%02X\n", address);
     }
+  }else {
+    if (address == 0x00) {
+      Serial.printf("READ BULK COMMAND ARRIVED: 0x%02X\n", txBuf[1]);
+    }
   }
 }
 

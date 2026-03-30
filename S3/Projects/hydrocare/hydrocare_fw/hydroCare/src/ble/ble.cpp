@@ -253,7 +253,7 @@ void sendDownsampledImages() {
         int remaining = 512;  // 16x16 pixels * 2 bytes
         int offset = 0;
         
-        Serial.println("[BLE] Sending 16x16 downsampled RGB frame...");
+        //Serial.println("[BLE] Sending 16x16 downsampled RGB frame...");
         
         while (remaining > 0) {
             int chunkSize = remaining > 200 ? 200 : remaining;
@@ -278,7 +278,7 @@ void sendDownsampledImages() {
         int remaining = 384;  // 16x12 pixels * 2 bytes
         int offset = 0;
         
-        Serial.println("[BLE] Sending 16x12 IR frame...");
+        //Serial.println("[BLE] Sending 16x12 IR frame...");
         
         while (remaining > 0) {
             int chunkSize = remaining > 200 ? 200 : remaining;
@@ -297,7 +297,7 @@ void sendDownsampledImages() {
         }
     }
     
-    Serial.println("[BLE] Image transmission complete!");
+    //Serial.println("[BLE] Image transmission complete!");
 }
 
 void notifyAll() {
